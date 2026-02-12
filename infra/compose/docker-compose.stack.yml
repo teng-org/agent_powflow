@@ -1,0 +1,154 @@
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: agentpowflow-postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: agentpowflow
+      POSTGRES_USER: apf
+      POSTGRES_PASSWORD: apf
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  mongodb:
+    image: mongo:7
+    container_name: agentpowflow-mongodb
+    restart: unless-stopped
+    ports:
+      - "${MONGODB_PORT:-27017}:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
+    volumes:
+      - mongodb_data:/data/db
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: agentpowflow-rabbitmq
+    restart: unless-stopped
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  minio:
+    image: minio/minio:latest
+    container_name: agentpowflow-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    container_name: agentpowflow-qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: services/control-plane/Dockerfile
+    container_name: agentpowflow-control-plane
+    restart: unless-stopped
+    ports:
+      - "${CONTROL_PLANE_PORT:-8080}:8080"
+    environment:
+      CONTROL_PLANE_PORT: ${CONTROL_PLANE_PORT:-8080}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/agentpowflow
+      SPRING_DATASOURCE_USERNAME: apf
+      SPRING_DATASOURCE_PASSWORD: apf
+      MONGODB_URI: mongodb://root:root@mongodb:27017/agentpowflow_events?authSource=admin
+    depends_on:
+      - postgres
+      - mongodb
+
+  execution-api:
+    build:
+      context: ../..
+      dockerfile: services/execution-plane/Dockerfile
+    container_name: agentpowflow-execution-api
+    restart: unless-stopped
+    ports:
+      - "${EXECUTION_API_PORT:-8090}:8090"
+    environment:
+      API_POOL_DEFAULT_CONFIG: /app/services/execution-plane/config/api_pool.default.json
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
+      EMBEDDING_MODE: ${EMBEDDING_MODE:-api_prefer}
+      EMBEDDING_MAX_CHARS: ${EMBEDDING_MAX_CHARS:-380}
+      EXECUTION_ADMIN_TOKEN: ${EXECUTION_ADMIN_TOKEN:-dev-admin-token}
+      EXECUTION_ADMIN_USERNAME: ${EXECUTION_ADMIN_USERNAME:-admin}
+      EXECUTION_ADMIN_PASSWORD: ${EXECUTION_ADMIN_PASSWORD:-admin123}
+      EXECUTION_ADMIN_ROLE: ${EXECUTION_ADMIN_ROLE:-PLATFORM_ADMIN}
+      EXECUTION_JWT_SECRET: ${EXECUTION_JWT_SECRET:-dev-jwt-secret}
+      EXECUTION_JWT_TTL_SECONDS: ${EXECUTION_JWT_TTL_SECONDS:-43200}
+      EXECUTION_ENV: ${EXECUTION_ENV:-dev}
+      EXECUTION_AUDIT_ENABLED: ${EXECUTION_AUDIT_ENABLED:-true}
+      EXECUTION_AUDIT_BASE_DIR: ${EXECUTION_AUDIT_BASE_DIR:-/app/logs/kb-audit}
+      GLOBAL_KB_ID: ${GLOBAL_KB_ID:-global-kb}
+      EXECUTION_CORS_ORIGINS: ${EXECUTION_CORS_ORIGINS:-http://localhost:5177,http://localhost:5180}
+      POSTGRES_DSN: postgresql://apf:apf@postgres:5432/agentpowflow
+      QDRANT_URL: http://qdrant:6333
+      CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: rpc://
+    volumes:
+      - ../../logs:/app/logs
+    depends_on:
+      - rabbitmq
+      - postgres
+
+  execution-worker:
+    build:
+      context: ../..
+      dockerfile: services/execution-plane/Dockerfile
+    container_name: agentpowflow-execution-worker
+    restart: unless-stopped
+    command: >
+      celery -A workers.app.celery_app:celery_app worker
+      -Q parse_queue,embed_queue,index_queue,agent_queue
+      -l info
+    environment:
+      API_POOL_DEFAULT_CONFIG: /app/services/execution-plane/config/api_pool.default.json
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
+      EMBEDDING_MODE: ${EMBEDDING_MODE:-api_prefer}
+      EMBEDDING_MAX_CHARS: ${EMBEDDING_MAX_CHARS:-380}
+      EXECUTION_ADMIN_TOKEN: ${EXECUTION_ADMIN_TOKEN:-dev-admin-token}
+      EXECUTION_ADMIN_USERNAME: ${EXECUTION_ADMIN_USERNAME:-admin}
+      EXECUTION_ADMIN_PASSWORD: ${EXECUTION_ADMIN_PASSWORD:-admin123}
+      EXECUTION_ADMIN_ROLE: ${EXECUTION_ADMIN_ROLE:-PLATFORM_ADMIN}
+      EXECUTION_JWT_SECRET: ${EXECUTION_JWT_SECRET:-dev-jwt-secret}
+      EXECUTION_JWT_TTL_SECONDS: ${EXECUTION_JWT_TTL_SECONDS:-43200}
+      GLOBAL_KB_ID: ${GLOBAL_KB_ID:-global-kb}
+      EXECUTION_CORS_ORIGINS: ${EXECUTION_CORS_ORIGINS:-http://localhost:5177,http://localhost:5180}
+      POSTGRES_DSN: postgresql://apf:apf@postgres:5432/agentpowflow
+      QDRANT_URL: http://qdrant:6333
+      CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: rpc://
+    depends_on:
+      - rabbitmq
+      - execution-api
+      - postgres
+
+volumes:
+  postgres_data:
+  mongodb_data:
+  rabbitmq_data:
+  minio_data:
+  qdrant_data:

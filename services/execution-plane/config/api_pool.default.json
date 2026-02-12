@@ -1,0 +1,31 @@
+{
+  "default_endpoint_id": "mock-default",
+  "default_endpoint_ids": {
+    "llm": "mock-default",
+    "embedding": "siliconflow-embedding-default"
+  },
+  "endpoints": [
+    {
+      "endpoint_id": "mock-default",
+      "name": "Mock Provider",
+      "provider": "mock",
+      "base_url": "mock://local",
+      "model": "mock-chat-v1",
+      "task": "llm",
+      "api_key": "",
+      "tenant_id": "*",
+      "enabled": true
+    },
+    {
+      "endpoint_id": "siliconflow-embedding-default",
+      "name": "SiliconFlow Embedding",
+      "provider": "siliconflow",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "model": "BAAI/bge-m3",
+      "task": "embedding",
+      "api_key": "",
+      "tenant_id": "*",
+      "enabled": true
+    }
+  ]
+}
