@@ -1,0 +1,16 @@
+{
+  "control_plane_port": 8099,
+  "execution_api_port": 8091,
+  "debug_web_port": 5177,
+  "kb_admin_web_port": 5180,
+  "web_app_port": 5173,
+  "web_admin_port": 5174,
+  "postgres_port": 5432,
+  "mongodb_port": 27017,
+  "rabbitmq_port": 5672,
+  "rabbitmq_management_port": 15672,
+  "minio_api_port": 9000,
+  "minio_console_port": 9001,
+  "qdrant_http_port": 6333,
+  "qdrant_grpc_port": 6334
+}

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Auth - Knowledge Chat</title>
+    <link rel="stylesheet" href="auth.css" />
+  </head>
+  <body>
+    <div class="auth-page">
+      <section class="auth-card">
+        <div class="brand">
+          <div class="brand-mark">K</div>
+          <div>
+            <div class="brand-title">Knowledge Chat</div>
+            <div class="brand-sub">Sign in or create an account</div>
+          </div>
+        </div>
+
+        <div class="status" id="statusText">Not signed in</div>
+
+        <label class="field">
+          Username
+          <input id="usernameInput" type="text" placeholder="yourname" />
+        </label>
+        <label class="field">
+          Password
+          <input id="passwordInput" type="password" placeholder="••••••••" />
+        </label>
+
+        <div class="actions">
+          <button id="loginBtn" class="primary">Login</button>
+          <button id="registerBtn" class="ghost">Register</button>
+        </div>
+        <button id="continueBtn" class="ghost" hidden>Continue to Chat</button>
+      </section>
+    </div>
+
+    <script src="auth.js"></script>
+  </body>
+</html>

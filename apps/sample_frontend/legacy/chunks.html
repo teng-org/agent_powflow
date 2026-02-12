@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Chunks</title>
+    <link rel="stylesheet" href="console.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div>
+        <h1>Chunks</h1>
+        <p id="docTitle">Document</p>
+      </div>
+      <div class="actions">
+        <button id="backBtn">Back</button>
+        <button id="reembedDocBtn">Re-embed</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel">
+        <div class="panel-header">
+          <div class="chip" id="docMeta">No document selected</div>
+          <div class="actions">
+            <button id="loadMoreBtn">Load more</button>
+          </div>
+        </div>
+        <div class="panel-header">
+          <input id="chunkSearch" type="text" placeholder="Search chunks" />
+          <select id="chunkSort">
+            <option value="id_asc">Sort: ID asc</option>
+            <option value="id_desc">Sort: ID desc</option>
+            <option value="page_asc">Sort: Page asc</option>
+            <option value="page_desc">Sort: Page desc</option>
+            <option value="status_dirty">Sort: Needs re-embed</option>
+          </select>
+        </div>
+        <div id="docDetail" class="detail"></div>
+        <div id="chunkGrid" class="chunk-grid"></div>
+      </section>
+    </main>
+
+    <div id="modal" class="modal" hidden>
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3 id="modalTitle">Edit chunk</h3>
+        </div>
+        <div class="field">
+          <label>Content</label>
+          <textarea id="modalContent"></textarea>
+        </div>
+        <div class="row-actions">
+          <button id="modalAutoTag">Auto Tag</button>
+          <button id="modalSave">Save</button>
+          <button id="modalCancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="chunks.js"></script>
+  </body>
+</html>

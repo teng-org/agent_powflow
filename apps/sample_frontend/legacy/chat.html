@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Knowledge Chat</title>
+    <link rel="stylesheet" href="chat.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">K</div>
+          <div>
+            <div class="brand-title">Knowledge Chat</div>
+            <div class="brand-sub">MVP</div>
+          </div>
+        </div>
+        <div class="user-panel">
+          <div class="section-title">User</div>
+          <div class="user-card">
+            <div id="userAvatar" class="user-avatar">?</div>
+            <div>
+              <div id="userName" class="user-name">Guest</div>
+              <div id="userStatus" class="hint">Not signed in</div>
+            </div>
+          </div>
+          <div class="user-actions">
+            <a id="loginLink" class="ghost" href="auth.html">Login / Register</a>
+            <button id="logoutBtn" class="ghost" hidden>Logout</button>
+          </div>
+        </div>
+        <button id="newConvBtn" class="primary">New chat</button>
+        <div class="sidebar-section">
+          <div class="section-title">History</div>
+          <div id="historyList" class="history-list"></div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <div class="title" id="conversationTitle">Chat</div>
+            <div class="subtitle" id="summaryBox">Summary: -</div>
+          </div>
+          <div class="meta" id="convMeta">Conversation: -</div>
+        </header>
+
+        <section class="chat">
+          <div id="messages" class="messages"></div>
+        </section>
+
+        <section class="composer">
+          <div class="input-row">
+            <textarea id="question" rows="2" placeholder="Ask a question..."></textarea>
+            <button id="askBtn" class="primary">Send</button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="chat.js"></script>
+  </body>
+</html>
