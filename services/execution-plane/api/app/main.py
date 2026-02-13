@@ -1257,6 +1257,7 @@ async def dbviz_qdrant_point_detail(
     point_id: str,
     request: Request,
     vector_preview_dims: int = 24,
+    full_vector: bool = False,
     _: dict = Depends(require_platform_admin),
 ) -> Dict:
     cap = max(0, min(int(vector_preview_dims), 256))
@@ -1281,6 +1282,7 @@ async def dbviz_qdrant_point_detail(
             if isinstance(v, list):
                 vector_values = [float(x) for x in v]
                 break
+    vector_preview = vector_values if full_vector else vector_values[:cap]
     return {
         "status": "ok",
         "collection": collection_name,
@@ -1288,7 +1290,8 @@ async def dbviz_qdrant_point_detail(
             "id": p.id,
             "payload": p.payload or {},
             "vector_dim": len(vector_values),
-            "vector_preview": vector_values[:cap],
+            "vector_preview": vector_preview,
+            "vector_is_full": len(vector_preview) == len(vector_values),
         },
         "trace_id": request.state.trace_id,
     }

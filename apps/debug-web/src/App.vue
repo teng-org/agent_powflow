@@ -260,14 +260,14 @@ async function loadQdrantPoints(reset = false) {
   dbviz.qdrantDetailError = ''
 }
 
-async function loadQdrantPointDetail(pointId) {
+async function loadQdrantPointDetail(pointId, fullVector = false) {
   if (!dbviz.qdrantCollection || !pointId) return
   dbviz.qdrantDetailLoading = true
   dbviz.qdrantDetailError = ''
   try {
     const resp = await fetchJson(
       `/api/v1/admin/dbviz/qdrant/collections/${encodeURIComponent(dbviz.qdrantCollection)}/points/${encodeURIComponent(String(pointId))}`,
-      { vector_preview_dims: 32 },
+      { vector_preview_dims: 32, full_vector: fullVector ? 'true' : 'false' },
     )
     dbviz.qdrantDetail = resp.item || null
   } catch (err) {
@@ -523,7 +523,17 @@ watch(
               <textarea :value="JSON.stringify(dbviz.qdrantDetail.payload, null, 2)" rows="8" readonly></textarea>
             </label>
             <label class="json-editor">
-              Vector Preview
+              <div class="vector-title-row">
+                <span>Vector Preview</span>
+                <button
+                  v-if="!dbviz.qdrantDetail.vector_is_full && (dbviz.qdrantDetail.vector_dim || 0) > (dbviz.qdrantDetail.vector_preview || []).length"
+                  class="ghost"
+                  @click="loadQdrantPointDetail(dbviz.qdrantDetail.id, true)"
+                  :disabled="dbviz.qdrantDetailLoading"
+                >
+                  查看完整向量
+                </button>
+              </div>
               <div class="vector-inline mono" :title="JSON.stringify(dbviz.qdrantDetail.vector_preview || [])">
                 {{ JSON.stringify(dbviz.qdrantDetail.vector_preview || []) }}
               </div>
