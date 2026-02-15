@@ -12,6 +12,7 @@ class IngestDocumentRequest(BaseModel):
     chunk_delimiter: str | None = None
     chunk_size: int = Field(default=500, ge=100, le=2000)
     chunk_overlap: int = Field(default=50, ge=0, le=500)
+    auto_summary: bool = False
 
 
 class SearchRequest(BaseModel):

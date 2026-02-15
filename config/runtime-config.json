@@ -12,5 +12,37 @@
   "execution_cors_origins": "http://localhost:5177,http://localhost:5180",
   "siliconflow_api_key": "sk-ajbyoveqnuhqouujbmhvavmkamqyymaknragtvhbophfzkoe",
   "embedding_mode": "api_strict",
-  "embedding_max_chars": 380
+  "embedding_max_chars": 380,
+  "summary_segment_chars": 3200,
+  "summary_segment_stable": true,
+  "summary_segment_unit_max_chars": 1200,
+  "summary_segment_overlap": 120,
+  "summary_segment_max_chunks": 48,
+  "summary_segment_concurrency": 8,
+  "summary_min_chars": 120,
+  "summary_max_chars": 900,
+  "summary_overview_max_chars": 80,
+  "summary_doc_max_tokens": 1200,
+  "summary_repair_max_tokens": 360,
+  "summary_kb_batch_size": 20,
+  "summary_kb_batch_max_tokens": 900,
+  "summary_kb_max_chars": 1200,
+  "summary_kb_final_max_tokens": 1400,
+  "api_slot_max_per_endpoint": 8,
+  "api_slot_wait_seconds": 60,
+  "api_slot_ttl_seconds": 120,
+  "api_model_pricing": {
+    "default": {
+      "input_per_1k": 0.0,
+      "output_per_1k": 0.0
+    },
+    "BAAI/bge-m3": {
+      "input_per_1k": 0.0,
+      "output_per_1k": 0.0
+    },
+    "deepseek-ai/DeepSeek-V3.2": {
+      "input_per_1k": 0.002,
+      "output_per_1k": 0.003
+    }
+  }
 }

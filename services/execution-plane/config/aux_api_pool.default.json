@@ -1,0 +1,35 @@
+{
+  "default_endpoint_id": "siliconflow-summary-llm",
+  "default_endpoint_ids": {
+    "summary_llm": "siliconflow-summary-llm",
+    "summary_embedding": "siliconflow-summary-embedding"
+  },
+  "endpoints": [
+    {
+      "endpoint_id": "siliconflow-summary-llm",
+      "name": "SiliconFlow Summary LLM",
+      "provider": "openai_compatible",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "model": "deepseek-ai/DeepSeek-V3.2",
+      "task": "summary_llm",
+      "api_key": "",
+      "tenant_id": "*",
+      "enabled": true,
+      "input_per_1k": 0.002,
+      "output_per_1k": 0.003
+    },
+    {
+      "endpoint_id": "siliconflow-summary-embedding",
+      "name": "SiliconFlow Summary Embedding",
+      "provider": "siliconflow",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "model": "BAAI/bge-m3",
+      "task": "summary_embedding",
+      "api_key": "",
+      "tenant_id": "*",
+      "enabled": true,
+      "input_per_1k": 0.0,
+      "output_per_1k": 0.0
+    }
+  ]
+}

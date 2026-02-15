@@ -6,17 +6,6 @@
   },
   "endpoints": [
     {
-      "endpoint_id": "mock-default",
-      "name": "Mock Provider",
-      "provider": "mock",
-      "base_url": "mock://local",
-      "model": "mock-chat-v1",
-      "task": "llm",
-      "api_key": "",
-      "tenant_id": "*",
-      "enabled": true
-    },
-    {
       "endpoint_id": "siliconflow-embedding-default",
       "name": "SiliconFlow Embedding",
       "provider": "siliconflow",
@@ -25,7 +14,9 @@
       "task": "embedding",
       "api_key": "",
       "tenant_id": "*",
-      "enabled": true
+      "enabled": true,
+      "input_per_1k": 0.0,
+      "output_per_1k": 0.0
     }
   ]
 }

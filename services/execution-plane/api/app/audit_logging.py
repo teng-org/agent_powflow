@@ -41,12 +41,15 @@ def route_meta(method: str, path_template: str) -> dict[str, str]:
         ("POST", "/api/v1/admin/kbs"): {"event": "kb.kb.create", "action": "create", "resource_type": "kb"},
         ("PATCH", "/api/v1/admin/kbs/{kb_id}"): {"event": "kb.kb.rename", "action": "update", "resource_type": "kb"},
         ("DELETE", "/api/v1/admin/kbs/{kb_id}"): {"event": "kb.kb.delete", "action": "delete", "resource_type": "kb"},
+        ("POST", "/api/v1/admin/kbs/{kb_id}/summarize"): {"event": "kb.kb.summarize", "action": "update", "resource_type": "kb"},
         ("POST", "/api/v1/admin/kbs/{kb_id}/documents/upload"): {"event": "kb.document.upload", "action": "upload", "resource_type": "document"},
         ("POST", "/api/v1/admin/kbs/{kb_id}/documents/ingest"): {"event": "kb.document.ingest", "action": "create", "resource_type": "document"},
+        ("POST", "/api/v1/admin/kbs/{kb_id}/documents/batch"): {"event": "kb.document.batch", "action": "update", "resource_type": "document"},
         ("GET", "/api/v1/admin/kbs/{kb_id}/documents"): {"event": "kb.document.list", "action": "read", "resource_type": "document"},
         ("DELETE", "/api/v1/admin/kbs/{kb_id}/documents/{doc_id}"): {"event": "kb.document.delete", "action": "delete", "resource_type": "document"},
         ("POST", "/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/reindex"): {"event": "kb.document.reindex", "action": "update", "resource_type": "document"},
         ("POST", "/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/chunk"): {"event": "kb.document.chunk", "action": "update", "resource_type": "document"},
+        ("POST", "/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/summarize"): {"event": "kb.document.summarize", "action": "update", "resource_type": "document"},
         ("GET", "/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/chunks"): {"event": "kb.chunk.list", "action": "read", "resource_type": "chunk"},
         ("PUT", "/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/chunks/{chunk_id}/draft"): {"event": "kb.chunk.draft.update", "action": "update", "resource_type": "chunk"},
         ("DELETE", "/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/chunks/{chunk_id}/draft"): {"event": "kb.chunk.draft.clear", "action": "delete", "resource_type": "chunk"},
@@ -55,6 +58,8 @@ def route_meta(method: str, path_template: str) -> dict[str, str]:
         ("DELETE", "/api/v1/admin/tasks"): {"event": "kb.task.clear", "action": "delete", "resource_type": "task"},
         ("POST", "/api/v1/admin/tasks/{task_id}/cancel"): {"event": "kb.task.cancel", "action": "cancel", "resource_type": "task"},
         ("GET", "/api/v1/admin/tasks/{task_id}/events"): {"event": "kb.task.events", "action": "read", "resource_type": "task"},
+        ("GET", "/api/v1/admin/tasks/batches/{batch_id}"): {"event": "kb.task.batch.read", "action": "read", "resource_type": "task_batch"},
+        ("POST", "/api/v1/admin/tasks/batches/{batch_id}/retry-failed"): {"event": "kb.task.batch.retry", "action": "retry", "resource_type": "task_batch"},
         ("PUT", "/api/v1/admin/system/upload-settings"): {"event": "kb.setting.upload.update", "action": "update", "resource_type": "setting"},
     }
     return mapping.get((method.upper(), path_template), {"event": "kb.api.call", "action": "call", "resource_type": "api"})
@@ -137,6 +142,12 @@ async def summarize_body(request: Request, path_template: str, max_inspect_bytes
         summary["filename_hash"] = _hash12(str(data.get("filename", "")))
         summary["content_len"] = len(content)
         summary["content_sha256_12"] = _hash12(content)
+    elif path_template.endswith("/documents/batch"):
+        summary["operation"] = _safe(data.get("operation", ""))
+        summary["doc_count"] = len(data.get("doc_ids") or [])
+        summary["target_kb_id"] = _safe(data.get("target_kb_id", ""))
+        summary["chunk_method"] = _safe(data.get("chunk_method", ""))
+        summary["tags_count"] = len(data.get("tags") or [])
     elif path_template.endswith("/documents/{doc_id}/reindex"):
         summary["chunk_size"] = data.get("chunk_size")
         summary["chunk_overlap"] = data.get("chunk_overlap")

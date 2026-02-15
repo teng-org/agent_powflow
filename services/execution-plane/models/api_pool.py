@@ -17,6 +17,8 @@ class ApiEndpoint(BaseModel):
     api_key: str = ""
     tenant_id: str = "*"
     enabled: bool = True
+    input_per_1k: float = 0.0
+    output_per_1k: float = 0.0
 
 
 class ApiPoolSnapshot(BaseModel):
@@ -26,10 +28,10 @@ class ApiPoolSnapshot(BaseModel):
 
 
 class ApiPoolManager:
-    def __init__(self) -> None:
+    def __init__(self, namespace: str = "api_pool") -> None:
         self._lock = Lock()
         self._snapshot = ApiPoolSnapshot()
-        self._store = ApiPoolMongoStore()
+        self._store = ApiPoolMongoStore(namespace=namespace)
 
     def bootstrap(self, file_path: str) -> ApiPoolSnapshot:
         """Load from Mongo first; if empty, seed with file defaults."""
@@ -194,3 +196,4 @@ class ApiPoolManager:
 
 
 api_pool_manager = ApiPoolManager()
+aux_api_pool_manager = ApiPoolManager(namespace="aux_api_pool")

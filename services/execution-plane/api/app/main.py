@@ -26,7 +26,7 @@ from api.app.audit_logging import (
     summarize_body,
     summarize_error_response_body,
 )
-from models.api_pool import ApiEndpoint, api_pool_manager
+from models.api_pool import ApiEndpoint, api_pool_manager, aux_api_pool_manager
 from retrieval.schemas import SearchRequest
 from retrieval.service import preprocess_text_for_chunk, search
 from retrieval.store import kb_store
@@ -57,6 +57,9 @@ SUPPORTED_DBVIZ_TABLES = {
     "task_events",
     "chunk_drafts",
     "system_settings",
+    "api_token_usage",
+    "api_usage_budgets",
+    "api_usage_alerts",
 }
 
 cors_origins = os.getenv("EXECUTION_CORS_ORIGINS", "http://localhost:5177,http://localhost:5180")
@@ -136,10 +139,16 @@ class ApiPoolUpsertRequest(BaseModel):
     api_key: str = ""
     tenant_id: str = "*"
     enabled: bool = True
+    input_per_1k: float = Field(default=0.0, ge=0.0)
+    output_per_1k: float = Field(default=0.0, ge=0.0)
 
 
 class ApiUploadSettingsRequest(BaseModel):
     max_file_size_mb: int = Field(default=20, ge=1, le=200)
+
+
+class ApiRuntimeConfigUpdateRequest(BaseModel):
+    updates: dict[str, object] = Field(default_factory=dict)
 
 
 class ApiChunkRunRequest(BaseModel):
@@ -147,6 +156,35 @@ class ApiChunkRunRequest(BaseModel):
     chunk_delimiter: str | None = None
     chunk_size: int = Field(default=500, ge=100, le=2000)
     chunk_overlap: int = Field(default=50, ge=0, le=500)
+
+
+class ApiBatchDocumentsRequest(BaseModel):
+    operation: str = Field(pattern="^(chunk|embed|summarize|move|tag|delete)$")
+    doc_ids: list[str] = Field(default_factory=list, min_length=1)
+    chunk_method: str = Field(default="sentence")
+    chunk_delimiter: str | None = None
+    chunk_size: int = Field(default=500, ge=100, le=2000)
+    chunk_overlap: int = Field(default=50, ge=0, le=500)
+    target_kb_id: str | None = None
+    tags: list[str] | None = None
+    batch_name: str | None = None
+
+
+class ApiDocumentTagsRequest(BaseModel):
+    tags: list[str] = Field(default_factory=list)
+    mode: str = Field(default="add", pattern="^(add|replace)$")
+
+
+class ApiUsageBudgetUpsertRequest(BaseModel):
+    scope_type: str = Field(pattern="^(TENANT|KB|MODEL|TASK_CATEGORY)$")
+    scope_value: str = ""
+    daily_token_limit: int = Field(default=0, ge=0)
+    daily_cost_limit: float = Field(default=0.0, ge=0.0)
+    enabled: bool = True
+
+
+class ApiUsageAlertStatusRequest(BaseModel):
+    status: str = Field(pattern="^(OPEN|ACK|RESOLVED)$")
 
 
 class _HtmlTextExtractor(HTMLParser):
@@ -213,6 +251,59 @@ def _mongo_db() -> str:
     return os.getenv("MONGODB_DB", "").strip() or os.getenv("MONGO_DB", "").strip() or "agentpowflow"
 
 
+def _runtime_config_path() -> str:
+    env_path = os.getenv("RUNTIME_CONFIG_PATH", "").strip()
+    if env_path:
+        return env_path
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../config/runtime-config.json"))
+
+
+def _load_runtime_config_json() -> dict:
+    path = _runtime_config_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_runtime_config_json(data: dict) -> None:
+    path = _runtime_config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+RUNTIME_CONFIG_ALLOWED_KEYS = {
+    "embedding_mode",
+    "embedding_max_chars",
+    "summary_segment_chars",
+    "summary_segment_stable",
+    "summary_segment_unit_max_chars",
+    "summary_segment_overlap",
+    "summary_segment_max_chunks",
+    "summary_segment_concurrency",
+    "summary_min_chars",
+    "summary_max_chars",
+    "summary_overview_max_chars",
+    "summary_doc_max_tokens",
+    "summary_repair_max_tokens",
+    "summary_kb_batch_size",
+    "summary_kb_batch_max_tokens",
+    "summary_kb_max_chars",
+    "summary_kb_final_max_tokens",
+    "api_slot_max_per_endpoint",
+    "api_slot_wait_seconds",
+    "api_slot_ttl_seconds",
+    "api_model_pricing",
+    "execution_cors_origins",
+}
+
+
 def _validate_chunk_settings(chunk_method: str, chunk_size: int, chunk_overlap: int, chunk_delimiter: str | None) -> tuple[int, int, str | None]:
     method = _validate_chunk_method(chunk_method)
     if method == "delimiter":
@@ -246,6 +337,75 @@ def _extract_text_from_file(filename: str, raw: bytes) -> str:
         parts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
         return _strip_nul("\n".join(parts))
     raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext or 'unknown'}")
+
+
+def _build_parse_payload(
+    *,
+    request: Request,
+    task_id: str,
+    task_type: str,
+    kb_id: str,
+    doc_id: str,
+    filename: str,
+    content: str,
+    chunk_method: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    chunk_delimiter: str | None,
+    auto_summary: bool = False,
+    batch_id: str | None = None,
+    batch_name: str | None = None,
+) -> dict:
+    return {
+        "task_id": task_id,
+        "task_type": task_type,
+        "tenant_id": request.state.tenant_id,
+        "actor_id": request.state.actor_id,
+        "trace_id": request.state.trace_id,
+        "source_service": request.state.source_service,
+        "kb_id": kb_id,
+        "doc_id": doc_id,
+        "filename": filename,
+        "content": content,
+        "chunk_method": chunk_method,
+        "chunk_delimiter": chunk_delimiter,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "auto_summary": bool(auto_summary),
+        "batch_id": batch_id or "",
+        "batch_name": batch_name or "",
+    }
+
+
+def _try_acquire_submission_lock(
+    *,
+    request: Request,
+    kb_id: str,
+    doc_id: str,
+    task_id: str,
+    task_type: str,
+    lock_scope: str,
+) -> Dict | None:
+    lock = kb_store.acquire_task_dedup_lock(
+        tenant_id=request.state.tenant_id,
+        kb_id=kb_id,
+        doc_id=doc_id or "",
+        lock_scope=lock_scope,
+        task_id=task_id,
+    )
+    if bool(lock.get("acquired")):
+        return None
+    existing_task_id = str(lock.get("task_id") or "")
+    if not existing_task_id:
+        raise HTTPException(status_code=409, detail="task lock exists but no active task id")
+    return {
+        "status": "accepted",
+        "task_id": existing_task_id,
+        "task_type": task_type,
+        "deduplicated": True,
+        "lock_scope": lock_scope,
+        "trace_id": request.state.trace_id,
+    }
 
 
 def _route_template(request: Request) -> str:
@@ -319,7 +479,12 @@ async def load_api_pool() -> None:
         "API_POOL_DEFAULT_CONFIG",
         os.path.join(os.path.dirname(__file__), "../../config/api_pool.default.json"),
     )
+    aux_config_path = os.getenv(
+        "AUX_API_POOL_DEFAULT_CONFIG",
+        os.path.join(os.path.dirname(__file__), "../../config/aux_api_pool.default.json"),
+    )
     api_pool_manager.bootstrap(os.path.abspath(config_path))
+    aux_api_pool_manager.bootstrap(os.path.abspath(aux_config_path))
     audit_sink.start()
 
 
@@ -492,12 +657,64 @@ async def delete_kb(kb_id: str, request: Request, _: dict = Depends(require_kb_w
     return {"status": "ok", "deleted": kb_id, "trace_id": request.state.trace_id}
 
 
+@app.post("/api/v1/admin/kbs/{kb_id}/summarize")
+async def summarize_kb(kb_id: str, request: Request, _: dict = Depends(require_kb_write)) -> Dict:
+    kb_item = kb_store.get_kb(request.state.tenant_id, kb_id)
+    if not kb_item:
+        raise HTTPException(status_code=404, detail="kb not found")
+    task_id = str(uuid.uuid4())
+    dedup = _try_acquire_submission_lock(
+        request=request,
+        kb_id=kb_id,
+        doc_id="",
+        task_id=task_id,
+        task_type="KB_SUMMARIZE",
+        lock_scope="KB_SUMMARY",
+    )
+    if dedup:
+        dedup["kb_id"] = kb_id
+        return dedup
+    payload = {
+        "task_id": task_id,
+        "task_type": "KB_SUMMARIZE",
+        "tenant_id": request.state.tenant_id,
+        "actor_id": request.state.actor_id,
+        "trace_id": request.state.trace_id,
+        "source_service": request.state.source_service,
+        "kb_id": kb_id,
+        "kb_name": kb_item.get("name", kb_id),
+    }
+    kb_store.create_task_record(
+        task_id,
+        request.state.tenant_id,
+        kb_id,
+        "",
+        "KB_SUMMARIZE",
+        "SUMMARIZING",
+        filename=kb_item.get("name", kb_id),
+    )
+    celery_app.send_task("app.tasks.summarize_kb", args=[payload], queue="parse_queue", task_id=task_id)
+    return {"status": "accepted", "task_id": task_id, "task_type": "KB_SUMMARIZE", "kb_id": kb_id, "trace_id": request.state.trace_id}
+
+
 @app.post("/api/v1/admin/kbs/{kb_id}/documents/ingest")
 async def ingest(kb_id: str, body: ApiIngestRequest, request: Request, _: dict = Depends(require_kb_write)) -> Dict:
     kb_store.ensure_kb(request.state.tenant_id, kb_id)
     doc_id = body.doc_id or str(uuid.uuid4())
     filename = body.filename or f"{doc_id}.txt"
     task_id = str(uuid.uuid4())
+    dedup = _try_acquire_submission_lock(
+        request=request,
+        kb_id=kb_id,
+        doc_id=doc_id,
+        task_id=task_id,
+        task_type="DOC_INGEST",
+        lock_scope="DOC_PARSE",
+    )
+    if dedup:
+        dedup["kb_id"] = kb_id
+        dedup["doc_id"] = doc_id
+        return dedup
     payload = {
         "task_id": task_id,
         "task_type": "DOC_INGEST",
@@ -512,6 +729,7 @@ async def ingest(kb_id: str, body: ApiIngestRequest, request: Request, _: dict =
         "chunk_method": "fixed",
         "chunk_size": body.chunk_size,
         "chunk_overlap": body.chunk_overlap,
+        "auto_summary": True,
     }
     kb_store.create_task_record(task_id, request.state.tenant_id, kb_id, doc_id, "DOC_INGEST", "PARSING", filename=filename)
     celery_app.send_task("app.tasks.parse_document", args=[payload], queue="parse_queue", task_id=task_id)
@@ -603,6 +821,23 @@ async def upload_documents(
             kb_store.set_document_status(request.state.tenant_id, kb_id, doc_id, "CLEANED")
         else:
             task_id = str(uuid.uuid4())
+            dedup = _try_acquire_submission_lock(
+                request=request,
+                kb_id=kb_id,
+                doc_id=doc_id,
+                task_id=task_id,
+                task_type="DOC_INGEST",
+                lock_scope="DOC_PARSE",
+            )
+            if dedup:
+                accepted.append({
+                    "filename": file.filename,
+                    "doc_id": doc_id,
+                    "task_id": dedup.get("task_id"),
+                    "process_mode": process_mode,
+                    "deduplicated": True,
+                })
+                continue
             payload = {
                 "task_id": task_id,
                 "task_type": "DOC_INGEST",
@@ -618,6 +853,7 @@ async def upload_documents(
                 "chunk_delimiter": chunk_delimiter,
                 "chunk_size": chunk_size,
                 "chunk_overlap": chunk_overlap,
+                "auto_summary": True,
             }
             kb_store.create_task_record(task_id, request.state.tenant_id, kb_id, doc_id, "DOC_INGEST", "PARSING", filename=file.filename)
             celery_app.send_task("app.tasks.parse_document", args=[payload], queue="parse_queue", task_id=task_id)
@@ -654,6 +890,39 @@ async def update_upload_settings(
 ) -> Dict:
     item = kb_store.set_upload_settings(body.max_file_size_mb, request.state.actor_id)
     return {"status": "ok", "item": item, "trace_id": request.state.trace_id}
+
+
+@app.get("/api/v1/admin/system/runtime-config")
+async def get_runtime_config(request: Request, _: dict = Depends(require_platform_admin)) -> Dict:
+    data = _load_runtime_config_json()
+    safe_items = {k: data.get(k) for k in sorted(RUNTIME_CONFIG_ALLOWED_KEYS) if k in data}
+    return {
+        "status": "ok",
+        "item": safe_items,
+        "allowed_keys": sorted(RUNTIME_CONFIG_ALLOWED_KEYS),
+        "path": _runtime_config_path(),
+        "trace_id": request.state.trace_id,
+    }
+
+
+@app.patch("/api/v1/admin/system/runtime-config")
+async def patch_runtime_config(
+    body: ApiRuntimeConfigUpdateRequest,
+    request: Request,
+    _: dict = Depends(require_platform_admin),
+) -> Dict:
+    updates = body.updates or {}
+    if not updates:
+        raise HTTPException(status_code=400, detail="updates cannot be empty")
+    illegal = [k for k in updates.keys() if k not in RUNTIME_CONFIG_ALLOWED_KEYS]
+    if illegal:
+        raise HTTPException(status_code=400, detail=f"unsupported keys: {', '.join(sorted(illegal))}")
+    current = _load_runtime_config_json()
+    for k, v in updates.items():
+        current[k] = v
+    _save_runtime_config_json(current)
+    safe_items = {k: current.get(k) for k in sorted(RUNTIME_CONFIG_ALLOWED_KEYS) if k in current}
+    return {"status": "ok", "item": safe_items, "updated_keys": sorted(list(updates.keys())), "trace_id": request.state.trace_id}
 
 
 @app.get("/api/v1/admin/kbs/{kb_id}/documents")
@@ -714,6 +983,17 @@ async def commit_chunk_drafts(kb_id: str, doc_id: str, request: Request, _: dict
     if not doc:
         raise HTTPException(status_code=404, detail="document not found")
     task_id = str(uuid.uuid4())
+    dedup = _try_acquire_submission_lock(
+        request=request,
+        kb_id=kb_id,
+        doc_id=doc_id,
+        task_id=task_id,
+        task_type="CHUNK_COMMIT",
+        lock_scope="DOC_COMMIT",
+    )
+    if dedup:
+        dedup["doc_id"] = doc_id
+        return dedup
     payload = {
         "task_id": task_id,
         "task_type": "DOC_REINDEX",
@@ -775,6 +1055,17 @@ async def reindex_document(
     if not content:
         raise HTTPException(status_code=400, detail="document content unavailable for reindex")
     task_id = str(uuid.uuid4())
+    dedup = _try_acquire_submission_lock(
+        request=request,
+        kb_id=kb_id,
+        doc_id=doc_id,
+        task_id=task_id,
+        task_type="DOC_REINDEX",
+        lock_scope="DOC_PARSE",
+    )
+    if dedup:
+        dedup["doc_id"] = doc_id
+        return dedup
     payload = {
         "task_id": task_id,
         "tenant_id": request.state.tenant_id,
@@ -789,6 +1080,7 @@ async def reindex_document(
         "chunk_delimiter": chunk_delimiter,
         "chunk_size": chunk_size,
         "chunk_overlap": chunk_overlap,
+        "auto_summary": False,
     }
     kb_store.set_document_chunk_config(
         request.state.tenant_id,
@@ -835,6 +1127,17 @@ async def chunk_document(
         raise HTTPException(status_code=400, detail="document content unavailable for chunking")
     task_id = str(uuid.uuid4())
     task_type = "DOC_RECHUNK" if int(data.get("chunk_count") or 0) > 0 else "DOC_CHUNK"
+    dedup = _try_acquire_submission_lock(
+        request=request,
+        kb_id=kb_id,
+        doc_id=doc_id,
+        task_id=task_id,
+        task_type=task_type,
+        lock_scope="DOC_PARSE",
+    )
+    if dedup:
+        dedup["doc_id"] = doc_id
+        return dedup
     payload = {
         "task_id": task_id,
         "task_type": task_type,
@@ -850,6 +1153,7 @@ async def chunk_document(
         "chunk_delimiter": chunk_delimiter,
         "chunk_size": chunk_size,
         "chunk_overlap": chunk_overlap,
+        "auto_summary": False,
     }
     kb_store.set_document_chunk_config(
         request.state.tenant_id,
@@ -877,6 +1181,470 @@ async def chunk_document(
         "doc_id": doc_id,
         "trace_id": request.state.trace_id,
     }
+
+
+@app.post("/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/summarize")
+async def summarize_document(
+    kb_id: str,
+    doc_id: str,
+    request: Request,
+    _: dict = Depends(require_kb_write),
+) -> Dict:
+    data = kb_store.get_document(request.state.tenant_id, kb_id, doc_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="document not found")
+    content = data.get("raw_text", "") or kb_store.build_document_text(request.state.tenant_id, kb_id, doc_id)
+    if not content:
+        raise HTTPException(status_code=400, detail="document content unavailable for summarize")
+    task_id = str(uuid.uuid4())
+    dedup = _try_acquire_submission_lock(
+        request=request,
+        kb_id=kb_id,
+        doc_id=doc_id,
+        task_id=task_id,
+        task_type="DOC_SUMMARIZE",
+        lock_scope="DOC_SUMMARY",
+    )
+    if dedup:
+        dedup["doc_id"] = doc_id
+        return dedup
+    payload = {
+        "task_id": task_id,
+        "task_type": "DOC_SUMMARIZE",
+        "tenant_id": request.state.tenant_id,
+        "actor_id": request.state.actor_id,
+        "trace_id": request.state.trace_id,
+        "source_service": request.state.source_service,
+        "kb_id": kb_id,
+        "doc_id": doc_id,
+        "filename": data.get("filename", "unknown.txt"),
+        "content": content,
+    }
+    kb_store.create_task_record(
+        task_id,
+        request.state.tenant_id,
+        kb_id,
+        doc_id,
+        "DOC_SUMMARIZE",
+        "SUMMARIZING",
+        filename=data.get("filename", "unknown.txt"),
+    )
+    celery_app.send_task("app.tasks.summarize_document", args=[payload], queue="parse_queue", task_id=task_id)
+    return {
+        "status": "accepted",
+        "task_id": task_id,
+        "task_type": "DOC_SUMMARIZE",
+        "doc_id": doc_id,
+        "trace_id": request.state.trace_id,
+    }
+
+
+@app.post("/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/tags")
+async def update_document_tags(
+    kb_id: str,
+    doc_id: str,
+    body: ApiDocumentTagsRequest,
+    request: Request,
+    _: dict = Depends(require_kb_write),
+) -> Dict:
+    doc = kb_store.get_document(request.state.tenant_id, kb_id, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="document not found")
+    tags = [str(x or "").strip() for x in (body.tags or []) if str(x or "").strip()]
+    if not tags:
+        raise HTTPException(status_code=400, detail="tags is required")
+    mode = (body.mode or "add").strip().lower()
+    if mode == "replace":
+        ok = kb_store.set_document_tags(request.state.tenant_id, kb_id, doc_id, tags)
+    else:
+        ok = kb_store.add_document_tags(request.state.tenant_id, kb_id, doc_id, tags)
+    if not ok:
+        raise HTTPException(status_code=404, detail="document not found")
+    item = kb_store.get_document(request.state.tenant_id, kb_id, doc_id) or {}
+    return {
+        "status": "ok",
+        "doc_id": doc_id,
+        "kb_id": kb_id,
+        "mode": mode,
+        "tags": item.get("tags_json") or [],
+        "trace_id": request.state.trace_id,
+    }
+
+
+@app.post("/api/v1/admin/kbs/{kb_id}/documents/batch")
+async def batch_documents(
+    kb_id: str,
+    body: ApiBatchDocumentsRequest,
+    request: Request,
+    _: dict = Depends(require_kb_write),
+) -> Dict:
+    operation = (body.operation or "").strip().lower()
+    doc_ids = [str(x or "").strip() for x in (body.doc_ids or []) if str(x or "").strip()]
+    if not doc_ids:
+        raise HTTPException(status_code=400, detail="doc_ids is required")
+    unique_doc_ids = list(dict.fromkeys(doc_ids))
+    docs_map = {d["doc_id"]: d for d in kb_store.list_documents(request.state.tenant_id, kb_id, limit=1000)}
+    missing_ids = [x for x in unique_doc_ids if x not in docs_map]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail=f"documents not found: {', '.join(missing_ids[:10])}")
+
+    batch_id = str(uuid.uuid4())
+    batch_name = (body.batch_name or f"批量{operation}-{datetime.now().strftime('%m%d-%H%M%S')}").strip()
+    parent_task_id = str(uuid.uuid4())
+    parent_task_type = f"BATCH_DOC_{operation.upper()}"
+    total = len(unique_doc_ids)
+    kb_store.create_task_record(
+        parent_task_id,
+        request.state.tenant_id,
+        kb_id,
+        "",
+        parent_task_type,
+        "BATCH_RUNNING",
+        filename=batch_name,
+        batch_id=batch_id,
+        batch_name=batch_name,
+        batch_is_parent=True,
+    )
+    kb_store.update_task_record(parent_task_id, "RUNNING", "BATCH_RUNNING")
+    kb_store.update_task_progress(parent_task_id, "BATCH_RUNNING", 0, total, 0)
+    kb_store.create_task_batch(
+        batch_id=batch_id,
+        tenant_id=request.state.tenant_id,
+        kb_id=kb_id,
+        operation=operation,
+        batch_name=batch_name,
+        params=body.model_dump(),
+        total_items=total,
+        created_by=request.state.actor_id,
+        parent_task_id=parent_task_id,
+    )
+
+    accepted: list[dict] = []
+    failed: list[dict] = []
+    method = None
+    chunk_size = None
+    chunk_overlap = None
+    chunk_delimiter = None
+    if operation in {"chunk", "embed"}:
+        chunk_size, chunk_overlap, chunk_delimiter = _validate_chunk_settings(
+            chunk_method=body.chunk_method,
+            chunk_size=body.chunk_size,
+            chunk_overlap=body.chunk_overlap,
+            chunk_delimiter=body.chunk_delimiter,
+        )
+        method = _validate_chunk_method(body.chunk_method)
+
+    if operation == "move":
+        target_kb_id = str(body.target_kb_id or "").strip()
+        if not target_kb_id:
+            raise HTTPException(status_code=400, detail="target_kb_id is required for move")
+        kb_store.ensure_kb(request.state.tenant_id, target_kb_id)
+    else:
+        target_kb_id = ""
+
+    if operation == "tag":
+        tags = [str(x or "").strip() for x in (body.tags or []) if str(x or "").strip()]
+        if not tags:
+            raise HTTPException(status_code=400, detail="tags is required for tag")
+    else:
+        tags = []
+
+    for idx, doc_id in enumerate(unique_doc_ids):
+        doc = docs_map[doc_id]
+        filename = doc.get("filename", "unknown.txt")
+        active_task_ids = kb_store.find_active_doc_task_ids(request.state.tenant_id, kb_id, doc_id)
+        if active_task_ids:
+            failed.append(
+                {
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "reason": f"document has active task ({len(active_task_ids)})",
+                }
+            )
+            continue
+        if operation in {"chunk", "embed", "summarize"}:
+            content = doc.get("raw_text", "") or kb_store.build_document_text(request.state.tenant_id, kb_id, doc_id)
+            if not content:
+                failed.append({"doc_id": doc_id, "filename": filename, "reason": "document content unavailable"})
+                continue
+            task_id = str(uuid.uuid4())
+            if operation == "chunk":
+                task_type = "DOC_RECHUNK" if int(doc.get("chunk_count") or 0) > 0 else "DOC_CHUNK"
+                dedup = _try_acquire_submission_lock(
+                    request=request,
+                    kb_id=kb_id,
+                    doc_id=doc_id,
+                    task_id=task_id,
+                    task_type=task_type,
+                    lock_scope="DOC_PARSE",
+                )
+                if dedup:
+                    accepted.append({"doc_id": doc_id, "filename": filename, "task_id": dedup.get("task_id"), "index": idx + 1, "deduplicated": True})
+                    continue
+                kb_store.set_document_chunk_config(
+                    request.state.tenant_id,
+                    kb_id,
+                    doc_id,
+                    chunk_method=method,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    chunk_delimiter=chunk_delimiter,
+                )
+                payload = _build_parse_payload(
+                    request=request,
+                    task_id=task_id,
+                    task_type=task_type,
+                    kb_id=kb_id,
+                    doc_id=doc_id,
+                    filename=filename,
+                    content=content,
+                    chunk_method=method,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    chunk_delimiter=chunk_delimiter,
+                    batch_id=batch_id,
+                    batch_name=batch_name,
+                )
+                kb_store.create_task_record(
+                    task_id,
+                    request.state.tenant_id,
+                    kb_id,
+                    doc_id,
+                    task_type,
+                    "PARSING",
+                    filename=filename,
+                    batch_id=batch_id,
+                    batch_name=batch_name,
+                )
+                celery_app.send_task("app.tasks.parse_document", args=[payload], queue="parse_queue", task_id=task_id)
+            elif operation == "embed":
+                # For docs without chunks, run prerequisite chunking before re-embedding.
+                has_chunks = int(doc.get("chunk_count") or 0) > 0
+                task_type = "DOC_REINDEX" if has_chunks else "DOC_CHUNK"
+                dedup = _try_acquire_submission_lock(
+                    request=request,
+                    kb_id=kb_id,
+                    doc_id=doc_id,
+                    task_id=task_id,
+                    task_type=task_type,
+                    lock_scope="DOC_PARSE",
+                )
+                if dedup:
+                    accepted.append({"doc_id": doc_id, "filename": filename, "task_id": dedup.get("task_id"), "index": idx + 1, "deduplicated": True})
+                    continue
+                kb_store.set_document_chunk_config(
+                    request.state.tenant_id,
+                    kb_id,
+                    doc_id,
+                    chunk_method=method,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    chunk_delimiter=chunk_delimiter,
+                )
+                payload = _build_parse_payload(
+                    request=request,
+                    task_id=task_id,
+                    task_type=task_type,
+                    kb_id=kb_id,
+                    doc_id=doc_id,
+                    filename=filename,
+                    content=content,
+                    chunk_method=method,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    chunk_delimiter=chunk_delimiter,
+                    batch_id=batch_id,
+                    batch_name=batch_name,
+                )
+                kb_store.create_task_record(
+                    task_id,
+                    request.state.tenant_id,
+                    kb_id,
+                    doc_id,
+                    task_type,
+                    "PARSING",
+                    filename=filename,
+                    batch_id=batch_id,
+                    batch_name=batch_name,
+                )
+                celery_app.send_task("app.tasks.parse_document", args=[payload], queue="parse_queue", task_id=task_id)
+            else:
+                task_type = "DOC_SUMMARIZE"
+                dedup = _try_acquire_submission_lock(
+                    request=request,
+                    kb_id=kb_id,
+                    doc_id=doc_id,
+                    task_id=task_id,
+                    task_type=task_type,
+                    lock_scope="DOC_SUMMARY",
+                )
+                if dedup:
+                    accepted.append({"doc_id": doc_id, "filename": filename, "task_id": dedup.get("task_id"), "index": idx + 1, "deduplicated": True})
+                    continue
+                payload = {
+                    "task_id": task_id,
+                    "task_type": task_type,
+                    "tenant_id": request.state.tenant_id,
+                    "actor_id": request.state.actor_id,
+                    "trace_id": request.state.trace_id,
+                    "source_service": request.state.source_service,
+                    "kb_id": kb_id,
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "content": content,
+                    "batch_id": batch_id,
+                    "batch_name": batch_name,
+                }
+                kb_store.create_task_record(
+                    task_id,
+                    request.state.tenant_id,
+                    kb_id,
+                    doc_id,
+                    task_type,
+                    "SUMMARIZING_DOC",
+                    filename=filename,
+                    batch_id=batch_id,
+                    batch_name=batch_name,
+                )
+                celery_app.send_task("app.tasks.summarize_document", args=[payload], queue="parse_queue", task_id=task_id)
+            accepted.append({"doc_id": doc_id, "filename": filename, "task_id": task_id, "index": idx + 1})
+            continue
+
+        task_id = str(uuid.uuid4())
+        if operation == "move":
+            task_type = "DOC_MOVE"
+            stage = "MOVING"
+            lock_scope = "DOC_MOVE"
+        elif operation == "tag":
+            task_type = "DOC_TAG"
+            stage = "TAGGING"
+            lock_scope = "DOC_TAG"
+        else:
+            task_type = "DOC_DELETE"
+            stage = "DELETING"
+            lock_scope = "DOC_DELETE"
+        dedup = _try_acquire_submission_lock(
+            request=request,
+            kb_id=kb_id,
+            doc_id=doc_id,
+            task_id=task_id,
+            task_type=task_type,
+            lock_scope=lock_scope,
+        )
+        if dedup:
+            accepted.append({"doc_id": doc_id, "filename": filename, "task_id": dedup.get("task_id"), "index": idx + 1, "deduplicated": True})
+            continue
+        kb_store.create_task_record(
+            task_id,
+            request.state.tenant_id,
+            kb_id,
+            doc_id,
+            task_type,
+            stage,
+            filename=filename,
+            batch_id=batch_id,
+            batch_name=batch_name,
+        )
+        try:
+            if operation == "move":
+                payload = {
+                    "task_id": task_id,
+                    "task_type": task_type,
+                    "tenant_id": request.state.tenant_id,
+                    "actor_id": request.state.actor_id,
+                    "trace_id": request.state.trace_id,
+                    "source_service": request.state.source_service,
+                    "kb_id": kb_id,
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "target_kb_id": target_kb_id,
+                    "batch_id": batch_id,
+                    "batch_name": batch_name,
+                }
+                celery_app.send_task("app.tasks.move_document", args=[payload], queue="parse_queue", task_id=task_id)
+            elif operation == "tag":
+                payload = {
+                    "task_id": task_id,
+                    "task_type": task_type,
+                    "tenant_id": request.state.tenant_id,
+                    "actor_id": request.state.actor_id,
+                    "trace_id": request.state.trace_id,
+                    "source_service": request.state.source_service,
+                    "kb_id": kb_id,
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "tags": tags,
+                    "batch_id": batch_id,
+                    "batch_name": batch_name,
+                }
+                celery_app.send_task("app.tasks.tag_document", args=[payload], queue="parse_queue", task_id=task_id)
+            else:
+                payload = {
+                    "task_id": task_id,
+                    "task_type": task_type,
+                    "tenant_id": request.state.tenant_id,
+                    "actor_id": request.state.actor_id,
+                    "trace_id": request.state.trace_id,
+                    "source_service": request.state.source_service,
+                    "kb_id": kb_id,
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "batch_id": batch_id,
+                    "batch_name": batch_name,
+                }
+                celery_app.send_task("app.tasks.delete_document", args=[payload], queue="parse_queue", task_id=task_id)
+            accepted.append({"doc_id": doc_id, "filename": filename, "task_id": task_id, "index": idx + 1})
+        except Exception as exc:
+            failed.append({"doc_id": doc_id, "filename": filename, "reason": str(exc)})
+            kb_store.update_task_record(task_id, "FAILED", "FAILED", error_message=str(exc))
+            kb_store.append_task_event(task_id, request.state.tenant_id, kb_id, doc_id, "TASK_FAILED", "FAILED", {"error_message": str(exc)})
+
+    kb_store.refresh_task_batch(batch_id, tenant_id=request.state.tenant_id, kb_id=kb_id)
+    return {
+        "status": "accepted",
+        "batch_id": batch_id,
+        "batch_name": batch_name,
+        "parent_task_id": parent_task_id,
+        "operation": operation,
+        "accepted_count": len(accepted),
+        "failed_count": len(failed),
+        "accepted": accepted,
+        "failed": failed,
+        "trace_id": request.state.trace_id,
+    }
+
+
+@app.get("/api/v1/admin/tasks/batches/{batch_id}")
+async def get_task_batch(batch_id: str, request: Request, limit: int = 300, _: dict = Depends(require_kb_read)) -> Dict:
+    batch = kb_store.get_task_batch(batch_id, request.state.tenant_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="batch not found")
+    items = kb_store.list_batch_tasks(batch_id, request.state.tenant_id, limit=limit)
+    return {"status": "ok", "item": batch, "items": items, "trace_id": request.state.trace_id}
+
+
+@app.post("/api/v1/admin/tasks/batches/{batch_id}/retry-failed")
+async def retry_task_batch_failed(batch_id: str, request: Request, _: dict = Depends(require_kb_write)) -> Dict:
+    batch = kb_store.get_task_batch(batch_id, request.state.tenant_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="batch not found")
+    items = kb_store.list_batch_tasks(batch_id, request.state.tenant_id, limit=1000)
+    failed_doc_ids = [str(x.get("doc_id") or "") for x in items if not x.get("batch_is_parent") and str(x.get("status") or "").upper() == "FAILED" and str(x.get("doc_id") or "").strip()]
+    if not failed_doc_ids:
+        return {"status": "ok", "batch_id": batch_id, "accepted_count": 0, "failed_count": 0, "accepted": [], "failed": [], "trace_id": request.state.trace_id}
+    params = batch.get("params_json") or {}
+    body = ApiBatchDocumentsRequest(
+        operation=str(batch.get("operation") or ""),
+        doc_ids=failed_doc_ids,
+        chunk_method=str(params.get("chunk_method") or "sentence"),
+        chunk_delimiter=params.get("chunk_delimiter"),
+        chunk_size=int(params.get("chunk_size") or 500),
+        chunk_overlap=int(params.get("chunk_overlap") or 50),
+        target_kb_id=params.get("target_kb_id"),
+        tags=params.get("tags") or [],
+        batch_name=f"{batch.get('batch_name') or '批次'}-重试",
+    )
+    return await batch_documents(str(batch.get("kb_id") or ""), body, request, _)
 
 
 @app.get("/api/v1/admin/tasks")
@@ -935,15 +1703,67 @@ async def stream_admin_tasks(
 
 @app.post("/api/v1/admin/tasks/{task_id}/cancel")
 async def cancel_task(task_id: str, request: Request, _: dict = Depends(require_kb_write)) -> Dict:
-    exists = kb_store.request_cancel_task(task_id)
-    if not exists:
+    record = kb_store.get_task(task_id)
+    if not record:
         raise HTTPException(status_code=404, detail="task not found")
-    try:
-        celery_app.control.revoke(task_id, terminate=True)
-    except Exception:
-        pass
-    kb_store.update_task_record(task_id, "CANCELLING", "CANCELLING")
-    return {"status": "ok", "task_id": task_id, "state": "CANCELLING", "trace_id": request.state.trace_id}
+    kb_id_for_refresh = str(record.get("kb_id") or "")
+    batch_id_for_refresh = str(record.get("batch_id") or "")
+    cancelled_task_ids: list[str] = []
+    if kb_store.request_cancel_task(task_id):
+        cancelled_task_ids.append(task_id)
+        try:
+            celery_app.control.revoke(task_id, terminate=True)
+        except Exception:
+            pass
+        kb_store.update_task_record(task_id, "CANCELLED", "CANCELLED")
+        kb_store.append_task_event(
+            task_id,
+            str(record.get("tenant_id") or request.state.tenant_id),
+            kb_id_for_refresh,
+            str(record.get("doc_id") or ""),
+            "TASK_CANCELLED",
+            "CANCELLED",
+            {},
+        )
+
+    # Batch parent: cascade cancel to active children.
+    if bool(record.get("batch_is_parent")) and batch_id_for_refresh:
+        child_ids = kb_store.find_active_batch_task_ids(
+            request.state.tenant_id,
+            kb_id_for_refresh,
+            batch_id_for_refresh,
+        )
+        for child_id in child_ids:
+            if not kb_store.request_cancel_task(child_id):
+                continue
+            cancelled_task_ids.append(child_id)
+            try:
+                celery_app.control.revoke(child_id, terminate=True)
+            except Exception:
+                pass
+            kb_store.update_task_record(child_id, "CANCELLED", "CANCELLED")
+            child = kb_store.get_task(child_id) or {}
+            kb_store.append_task_event(
+                child_id,
+                str(child.get("tenant_id") or request.state.tenant_id),
+                str(child.get("kb_id") or kb_id_for_refresh),
+                str(child.get("doc_id") or ""),
+                "TASK_CANCELLED",
+                "CANCELLED",
+                {},
+            )
+        kb_store.refresh_task_batch(
+            batch_id_for_refresh,
+            tenant_id=request.state.tenant_id,
+            kb_id=kb_id_for_refresh,
+        )
+    return {
+        "status": "ok",
+        "task_id": task_id,
+        "state": "CANCELLED",
+        "cancelled_task_ids": cancelled_task_ids,
+        "trace_id": request.state.trace_id,
+    }
 
 
 @app.get("/api/v1/admin/tasks/{task_id}/events")
@@ -1067,6 +1887,232 @@ async def reload_default_api_pool(request: Request, _: dict = Depends(require_pl
         "count": len(snapshot.endpoints),
         "trace_id": request.state.trace_id,
     }
+
+
+@app.get("/api/v1/admin/aux-api-pool")
+async def list_aux_api_pool(request: Request, task: str | None = None, _: dict = Depends(require_platform_admin)) -> Dict:
+    endpoints = aux_api_pool_manager.list_endpoints(request.state.tenant_id, task=task)
+    return {
+        "status": "ok",
+        "tenant_id": request.state.tenant_id,
+        "items": [e.model_dump(exclude={"api_key"}) for e in endpoints],
+        "trace_id": request.state.trace_id,
+    }
+
+
+@app.post("/api/v1/admin/aux-api-pool")
+async def create_or_update_aux_api_pool(
+    body: ApiPoolUpsertRequest, request: Request, _: dict = Depends(require_platform_admin)
+) -> Dict:
+    endpoint = aux_api_pool_manager.upsert_endpoint(ApiEndpoint(**body.model_dump()))
+    return {"status": "ok", "item": endpoint.model_dump(exclude={"api_key"}), "trace_id": request.state.trace_id}
+
+
+@app.put("/api/v1/admin/aux-api-pool/{endpoint_id}")
+async def update_aux_api_pool(
+    endpoint_id: str,
+    body: ApiPoolUpsertRequest,
+    request: Request,
+    _: dict = Depends(require_platform_admin),
+) -> Dict:
+    if endpoint_id != body.endpoint_id:
+        raise HTTPException(status_code=400, detail="endpoint_id mismatch")
+    endpoint = aux_api_pool_manager.upsert_endpoint(ApiEndpoint(**body.model_dump()))
+    return {"status": "ok", "item": endpoint.model_dump(exclude={"api_key"}), "trace_id": request.state.trace_id}
+
+
+@app.delete("/api/v1/admin/aux-api-pool/{endpoint_id}")
+async def delete_aux_api_pool(endpoint_id: str, request: Request, _: dict = Depends(require_platform_admin)) -> Dict:
+    deleted = aux_api_pool_manager.delete_endpoint(endpoint_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="endpoint not found")
+    return {"status": "ok", "deleted": endpoint_id, "trace_id": request.state.trace_id}
+
+
+@app.post("/api/v1/admin/aux-api-pool/{endpoint_id}/set-default")
+async def set_default_aux_api_pool(
+    endpoint_id: str,
+    request: Request,
+    task: str | None = None,
+    _: dict = Depends(require_platform_admin),
+) -> Dict:
+    try:
+        default_id = aux_api_pool_manager.set_default(endpoint_id, task=task)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "ok", "default_endpoint_id": default_id, "trace_id": request.state.trace_id}
+
+
+@app.post("/api/v1/admin/aux-api-pool/reload-default")
+async def reload_default_aux_api_pool(request: Request, _: dict = Depends(require_platform_admin)) -> Dict:
+    config_path = os.getenv(
+        "AUX_API_POOL_DEFAULT_CONFIG",
+        os.path.join(os.path.dirname(__file__), "../../config/aux_api_pool.default.json"),
+    )
+    snapshot = aux_api_pool_manager.reset_from_file(os.path.abspath(config_path))
+    return {
+        "status": "ok",
+        "default_endpoint_id": snapshot.default_endpoint_id,
+        "default_endpoint_ids": snapshot.default_endpoint_ids,
+        "count": len(snapshot.endpoints),
+        "trace_id": request.state.trace_id,
+    }
+
+
+@app.get("/api/v1/admin/usage/api-tokens/summary")
+async def admin_api_token_usage_summary(
+    request: Request,
+    days: int = 30,
+    tenant_scope: str = "current",
+    limit: int = 200,
+    _: dict = Depends(require_platform_admin),
+) -> Dict:
+    include_all_tenants, tenant_id = _parse_tenant_scope(tenant_scope, request.state.tenant_id)
+    data = kb_store.get_api_token_usage_stats(
+        tenant_id=tenant_id,
+        days=days,
+        include_all_tenants=include_all_tenants,
+        limit=limit,
+    )
+    return {
+        "status": "ok",
+        "tenant_scope": "all" if include_all_tenants else "current",
+        "tenant_id": tenant_id,
+        "window_days": data.get("window_days", 30),
+        "totals": data.get("totals", {}),
+        "by_api": data.get("by_api", []),
+        "by_kb": data.get("by_kb", []),
+        "by_model": data.get("by_model", []),
+        "by_api_key": data.get("by_api_key", []),
+        "by_task_category": data.get("by_task_category", []),
+        "by_combination": data.get("by_combination", []),
+        "by_day": data.get("by_day", []),
+        "by_day_kb": data.get("by_day_kb", []),
+        "by_day_model": data.get("by_day_model", []),
+        "by_day_task_category": data.get("by_day_task_category", []),
+        "trace_id": request.state.trace_id,
+    }
+
+
+@app.get("/api/v1/admin/usage/api-tokens/events")
+async def admin_api_token_usage_events(
+    request: Request,
+    days: int = 30,
+    page: int = 1,
+    page_size: int = 50,
+    tenant_scope: str = "current",
+    api_path: str | None = None,
+    model: str | None = None,
+    api_key_fingerprint: str | None = None,
+    task_category: str | None = None,
+    _: dict = Depends(require_platform_admin),
+) -> Dict:
+    include_all_tenants, tenant_id = _parse_tenant_scope(tenant_scope, request.state.tenant_id)
+    data = kb_store.list_api_token_usage_events(
+        tenant_id=tenant_id,
+        days=days,
+        include_all_tenants=include_all_tenants,
+        page=page,
+        page_size=page_size,
+        api_path=api_path,
+        model=model,
+        api_key_fingerprint=api_key_fingerprint,
+        task_category=task_category,
+    )
+    return {
+        "status": "ok",
+        "tenant_scope": "all" if include_all_tenants else "current",
+        "tenant_id": tenant_id,
+        "window_days": data.get("window_days", 30),
+        "page": data.get("page", 1),
+        "page_size": data.get("page_size", 50),
+        "total": data.get("total", 0),
+        "items": data.get("items", []),
+        "trace_id": request.state.trace_id,
+    }
+
+
+@app.get("/api/v1/admin/usage/api-tokens/budgets")
+async def admin_api_token_usage_budgets(
+    request: Request,
+    _: dict = Depends(require_platform_admin),
+) -> Dict:
+    items = kb_store.list_api_usage_budgets(tenant_id=request.state.tenant_id)
+    return {"status": "ok", "items": items, "trace_id": request.state.trace_id}
+
+
+@app.put("/api/v1/admin/usage/api-tokens/budgets")
+async def admin_upsert_api_token_usage_budget(
+    body: ApiUsageBudgetUpsertRequest,
+    request: Request,
+    _: dict = Depends(require_platform_admin),
+) -> Dict:
+    item = kb_store.upsert_api_usage_budget(
+        tenant_id=request.state.tenant_id,
+        scope_type=body.scope_type,
+        scope_value=body.scope_value,
+        daily_token_limit=body.daily_token_limit,
+        daily_cost_limit=body.daily_cost_limit,
+        enabled=body.enabled,
+        actor_id=request.state.actor_id,
+    )
+    eval_data = kb_store.evaluate_api_usage_budgets(tenant_id=request.state.tenant_id)
+    return {"status": "ok", "item": item, "evaluation": eval_data, "trace_id": request.state.trace_id}
+
+
+@app.delete("/api/v1/admin/usage/api-tokens/budgets/{budget_id}")
+async def admin_delete_api_token_usage_budget(
+    budget_id: int,
+    request: Request,
+    _: dict = Depends(require_platform_admin),
+) -> Dict:
+    ok = kb_store.delete_api_usage_budget(tenant_id=request.state.tenant_id, budget_id=budget_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="budget not found")
+    return {"status": "ok", "deleted": budget_id, "trace_id": request.state.trace_id}
+
+
+@app.post("/api/v1/admin/usage/api-tokens/budgets/evaluate")
+async def admin_evaluate_api_token_usage_budget(
+    request: Request,
+    _: dict = Depends(require_platform_admin),
+) -> Dict:
+    data = kb_store.evaluate_api_usage_budgets(tenant_id=request.state.tenant_id)
+    return {"status": "ok", **data, "trace_id": request.state.trace_id}
+
+
+@app.get("/api/v1/admin/usage/api-tokens/alerts")
+async def admin_api_token_usage_alerts(
+    request: Request,
+    days: int = 30,
+    status: str = "OPEN",
+    limit: int = 200,
+    _: dict = Depends(require_platform_admin),
+) -> Dict:
+    data = kb_store.list_api_usage_alerts(
+        tenant_id=request.state.tenant_id,
+        days=days,
+        status=status,
+        limit=limit,
+    )
+    return {"status": "ok", **data, "trace_id": request.state.trace_id}
+
+
+@app.patch("/api/v1/admin/usage/api-tokens/alerts/{alert_id}")
+async def admin_update_api_token_usage_alert_status(
+    alert_id: int,
+    body: ApiUsageAlertStatusRequest,
+    request: Request,
+    _: dict = Depends(require_platform_admin),
+) -> Dict:
+    ok = kb_store.update_api_usage_alert_status(
+        tenant_id=request.state.tenant_id,
+        alert_id=alert_id,
+        status=body.status,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="alert not found")
+    return {"status": "ok", "alert_id": alert_id, "next_status": body.status, "trace_id": request.state.trace_id}
 
 
 @app.get("/api/v1/admin/dbviz/overview")

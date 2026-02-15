@@ -1,6 +1,8 @@
 import hashlib
 import re
+from typing import Callable
 
+from models.ai_gateway import ai_gateway
 from models.embedding_provider import embedding_provider
 from retrieval.schemas import IngestDocumentRequest, SearchRequest
 from retrieval.store import ChunkRecord, kb_store
@@ -41,6 +43,16 @@ def _emit_progress(req: IngestDocumentRequest, stage: str, current: int, total: 
         stage,
         {"status": "RUNNING", "current": c, "total": t, "progress_pct": pct},
     )
+
+
+def _is_task_cancel_requested(req: IngestDocumentRequest) -> bool:
+    task_id = str(req.task_id or "").strip()
+    if not task_id:
+        return False
+    try:
+        return bool(kb_store.is_cancel_requested(task_id))
+    except Exception:
+        return False
 
 
 def preprocess_text_for_chunk(text: str) -> str:
@@ -205,6 +217,93 @@ def _split_for_embedding_limit(text: str, max_chars: int, overlap: int = 40) -> 
     return out
 
 
+def run_document_and_kb_summary(
+    tenant_id: str,
+    kb_id: str,
+    doc_id: str,
+    filename: str,
+    content: str,
+    progress_cb: Callable[[str, int, int], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> dict:
+    doc_summary = ai_gateway.summarize_document(
+        tenant_id=tenant_id,
+        filename=filename,
+        text=content,
+        progress_cb=progress_cb,
+        should_cancel=should_cancel,
+        kb_id=kb_id,
+        doc_id=doc_id,
+    )
+    kb_store.set_document_summary(
+        tenant_id=tenant_id,
+        kb_id=kb_id,
+        doc_id=doc_id,
+        overview=doc_summary.get("overview", ""),
+        summary=doc_summary.get("summary", ""),
+        embedding=doc_summary.get("embedding", []),
+    )
+
+    kb_summary_text = ""
+    auto_kb_summary_triggered = False
+    if kb_store.should_auto_first_kb_summary(tenant_id, kb_id):
+        kb_item = kb_store.get_kb(tenant_id, kb_id) or {}
+        kb_name = str(kb_item.get("name") or kb_id)
+        summaries = kb_store.list_document_summaries(tenant_id, kb_id, limit=300)
+        kb_summary = ai_gateway.summarize_kb(
+            tenant_id=tenant_id,
+            kb_id=kb_id,
+            kb_name=kb_name,
+            doc_summaries=summaries,
+            progress_cb=progress_cb,
+            should_cancel=should_cancel,
+        )
+        kb_summary_text = str(kb_summary.get("summary", "") or "")
+        kb_store.set_kb_summary(
+            tenant_id=tenant_id,
+            kb_id=kb_id,
+            summary=kb_summary_text,
+            embedding=kb_summary.get("embedding", []),
+        )
+        auto_kb_summary_triggered = True
+    return {
+        "doc_overview": doc_summary.get("overview", ""),
+        "doc_summary": doc_summary.get("summary", ""),
+        "kb_summary": kb_summary_text,
+        "auto_kb_summary_triggered": auto_kb_summary_triggered,
+    }
+
+
+def run_kb_summary_only(
+    tenant_id: str,
+    kb_id: str,
+    progress_cb: Callable[[str, int, int], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> dict:
+    kb_item = kb_store.get_kb(tenant_id, kb_id) or {}
+    kb_name = str(kb_item.get("name") or kb_id)
+    summaries = kb_store.list_document_summaries(tenant_id, kb_id, limit=300)
+    kb_summary = ai_gateway.summarize_kb(
+        tenant_id=tenant_id,
+        kb_id=kb_id,
+        kb_name=kb_name,
+        doc_summaries=summaries,
+        progress_cb=progress_cb,
+        should_cancel=should_cancel,
+    )
+    kb_store.set_kb_summary(
+        tenant_id=tenant_id,
+        kb_id=kb_id,
+        summary=kb_summary.get("summary", ""),
+        embedding=kb_summary.get("embedding", []),
+    )
+    return {
+        "kb_id": kb_id,
+        "kb_name": kb_name,
+        "kb_summary": kb_summary.get("summary", ""),
+    }
+
+
 def ingest_document(req: IngestDocumentRequest) -> dict:
     safe_filename = _strip_nul(req.filename)
     safe_content = _strip_nul(req.content)
@@ -238,6 +337,13 @@ def ingest_document(req: IngestDocumentRequest) -> dict:
             safe_chunks.extend(_split_for_embedding_limit(text, max_chars=max_chars, overlap=min(40, req.chunk_overlap)))
         chunk_texts = safe_chunks
     kb_store.set_document_chunking_preview(req.tenant_id, req.kb_id, req.doc_id, len(chunk_texts))
+    kb_store.replace_chunks_preview(
+        req.tenant_id,
+        req.kb_id,
+        req.doc_id,
+        chunk_texts,
+        safe_filename,
+    )
     _emit_stage(req, "CHUNKING")
 
     kb_store.set_document_status(req.tenant_id, req.kb_id, req.doc_id, "EMBEDDING")
@@ -247,9 +353,17 @@ def ingest_document(req: IngestDocumentRequest) -> dict:
     chunks: list[ChunkRecord] = []
     emit_step = max(1, total_chunks // 50) if total_chunks > 0 else 1
     for idx, chunk_text in enumerate(chunk_texts):
+        if _is_task_cancel_requested(req):
+            raise RuntimeError("TASK_CANCELLED")
         raw = f"{req.tenant_id}:{req.kb_id}:{req.doc_id}:{idx}:{chunk_text}"
         chunk_id = hashlib.sha1(raw.encode("utf-8")).hexdigest()  # nosec B324
-        vector = embedding_provider.embed(req.tenant_id, chunk_text)
+        vector = embedding_provider.embed(
+            req.tenant_id,
+            chunk_text,
+            task="doc_embedding",
+            kb_id=req.kb_id,
+            doc_id=req.doc_id,
+        )
         chunks.append(
             ChunkRecord(
                 tenant_id=req.tenant_id,
@@ -270,6 +384,19 @@ def ingest_document(req: IngestDocumentRequest) -> dict:
     _emit_stage(req, "INDEXING")
     kb_store.replace_chunks(req.tenant_id, req.kb_id, req.doc_id, chunks)
     kb_store.set_document_status(req.tenant_id, req.kb_id, req.doc_id, "INDEXED")
+    if req.auto_summary:
+        _emit_stage(req, "SUMMARIZING")
+        try:
+            run_document_and_kb_summary(
+                tenant_id=req.tenant_id,
+                kb_id=req.kb_id,
+                doc_id=req.doc_id,
+                filename=safe_filename,
+                content=cleaned_content,
+            )
+        except Exception:
+            # Summary pipeline is best-effort; do not block core indexing.
+            pass
     _emit_stage(req, "INDEXED", "SUCCEEDED")
 
     return {
@@ -281,7 +408,13 @@ def ingest_document(req: IngestDocumentRequest) -> dict:
 
 
 def search(req: SearchRequest) -> list[dict]:
-    query_vec = embedding_provider.embed(req.tenant_id, req.query)
+    query_vec = embedding_provider.embed(
+        req.tenant_id,
+        req.query,
+        task="query_embedding",
+        kb_id=req.kb_id,
+        doc_id="",
+    )
     data = kb_store.search_chunks(
         tenant_id=req.tenant_id,
         kb_id=req.kb_id,

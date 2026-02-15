@@ -20,10 +20,14 @@ const taskStatusMap = ref({})
 const taskStageMap = ref({})
 const taskStatusReady = ref(false)
 const optimisticTaskMap = ref({})
+const retryLockedTaskIds = ref({})
+const retryLockedBatchIds = ref({})
 const taskNameByTaskId = ref({})
 let docsRefreshTimer = null
 let kbsRefreshTimer = null
 let noticeSeq = 0
+const UI_PREFS_KEY = 'kb-admin-ui-prefs-v1'
+let uiPrefsLoaded = false
 
 const ui = reactive({
   sidebarCollapsed: false,
@@ -34,6 +38,8 @@ const ui = reactive({
   showCommitConfirmModal: false,
   showDocDeleteCommitModal: false,
   showDeleteKbConfirmModal: false,
+  showBatchModal: false,
+  showDocTagModal: false,
   showChunkDetailModal: false,
   chunkEditMode: false,
   chunkDiffMode: false,
@@ -47,6 +53,13 @@ const uploadChunkConfig = reactive({ chunk_size: 500, chunk_overlap: 50, chunk_m
 const chunkRunConfig = reactive({ chunk_method: 'sentence', chunk_size: 500, chunk_overlap: 50, chunk_delimiter: '\\n\\n' })
 const uploadProcessMode = ref('UPLOAD_CLEAN_CHUNK_EMBED')
 const docChunkMethodMap = ref({})
+const docTagInput = ref('')
+const docTagModal = reactive({
+  doc_id: '',
+  kb_id: '',
+  filename: '',
+  tags: [],
+})
 const uploadInputRef = ref(null)
 const uploadQueue = ref([])
 const uploadLimitMb = ref(20)
@@ -76,6 +89,22 @@ const kbSearch = ref('')
 const kbSort = ref('name_asc')
 const docSearch = ref('')
 const docSort = ref('order_desc')
+const docStatusFilter = ref('all')
+const docTagFilter = ref('all')
+const docTagSearch = ref('')
+const selectedDocIds = ref([])
+const batchActionForm = reactive({
+  operation: 'chunk',
+  chunk_method: 'sentence',
+  chunk_size: 500,
+  chunk_overlap: 50,
+  chunk_delimiter: '\\n\\n',
+  target_kb_id: '',
+  tags_text: '',
+})
+const batchShowPrereqList = ref(false)
+const batchDetailMap = ref({})
+const batchDetailLoading = ref({})
 
 const loading = reactive({
   login: false,
@@ -111,9 +140,27 @@ const visibleKbs = computed(() => {
 })
 const visibleDocs = computed(() => {
   const keyword = docSearch.value.trim().toLowerCase()
+  const tagKeyword = docTagSearch.value.trim().toLowerCase()
   const list = docs.value.filter((doc) => {
-    if (!keyword) return true
-    return `${doc.filename || ''} ${doc.doc_id || ''}`.toLowerCase().includes(keyword)
+    const statusText = docPrimaryBadge(doc).text
+    const tags = Array.isArray(doc?.tags_json) ? doc.tags_json : []
+    const hasTag = tags.length > 0
+    if (keyword && !`${doc.filename || ''} ${doc.doc_id || ''}`.toLowerCase().includes(keyword)) return false
+    if (docStatusFilter.value === 'processing' && !isDocTaskLocked(doc)) return false
+    if (docStatusFilter.value === 'need_chunk' && statusText !== 'need chunk') return false
+    if (docStatusFilter.value === 'need_embed' && statusText !== 'need embed') return false
+    if (docStatusFilter.value === 'need_summary' && statusText !== 'need summary') return false
+    if (docStatusFilter.value === 'ok' && statusText !== 'ok') return false
+    if (docStatusFilter.value === 'failed' && String(doc?.status || '').toUpperCase() !== 'FAILED') return false
+    if (docStatusFilter.value === 'cancelled' && String(doc?.status || '').toUpperCase() !== 'CANCELLED') return false
+    if (docTagFilter.value === 'has' && !hasTag) return false
+    if (docTagFilter.value === 'none' && hasTag) return false
+    if (tagKeyword) {
+      if (!hasTag) return false
+      const joined = tags.map((t) => String(t || '').toLowerCase()).join(' ')
+      if (!joined.includes(tagKeyword)) return false
+    }
+    return true
   })
   const getOrder = (doc) => docSequenceNo(doc)
   return list.slice().sort((a, b) => {
@@ -126,6 +173,49 @@ const visibleDocs = computed(() => {
     return bt - at
   })
 })
+
+function loadUiPrefs() {
+  try {
+    const raw = localStorage.getItem(UI_PREFS_KEY)
+    if (!raw) return
+    const prefs = JSON.parse(raw || '{}')
+    if (typeof prefs.kbSort === 'string') kbSort.value = prefs.kbSort
+    if (typeof prefs.docSort === 'string') docSort.value = prefs.docSort
+    if (typeof prefs.docStatusFilter === 'string') docStatusFilter.value = prefs.docStatusFilter
+    if (typeof prefs.docTagFilter === 'string') docTagFilter.value = prefs.docTagFilter
+    if (typeof prefs.selectedKbId === 'string') selectedKbId.value = prefs.selectedKbId
+    if (typeof prefs.sidebarCollapsed === 'boolean') ui.sidebarCollapsed = prefs.sidebarCollapsed
+    if (typeof prefs.showTaskDrawer === 'boolean') ui.showTaskDrawer = prefs.showTaskDrawer
+    if (typeof prefs.kbSearch === 'string') kbSearch.value = prefs.kbSearch
+    if (typeof prefs.docSearch === 'string') docSearch.value = prefs.docSearch
+    if (typeof prefs.docTagSearch === 'string') docTagSearch.value = prefs.docTagSearch
+  } catch {
+    // ignore corrupted prefs
+  } finally {
+    uiPrefsLoaded = true
+  }
+}
+
+function saveUiPrefs() {
+  if (!uiPrefsLoaded) return
+  const payload = {
+    selectedKbId: String(selectedKbId.value || ''),
+    kbSort: String(kbSort.value || 'name_asc'),
+    docSort: String(docSort.value || 'order_desc'),
+    docStatusFilter: String(docStatusFilter.value || 'all'),
+    docTagFilter: String(docTagFilter.value || 'all'),
+    sidebarCollapsed: !!ui.sidebarCollapsed,
+    showTaskDrawer: !!ui.showTaskDrawer,
+    kbSearch: String(kbSearch.value || ''),
+    docSearch: String(docSearch.value || ''),
+    docTagSearch: String(docTagSearch.value || ''),
+  }
+  try {
+    localStorage.setItem(UI_PREFS_KEY, JSON.stringify(payload))
+  } catch {
+    // ignore storage errors
+  }
+}
 const pendingDraftSummary = computed(() => {
   const summary = {
     deleteCount: 0,
@@ -146,7 +236,44 @@ const pendingDraftSummary = computed(() => {
 })
 const pendingDocDeleteItems = computed(() => Object.values(pendingDocDeletes.value))
 const pendingDocDeleteCount = computed(() => pendingDocDeleteItems.value.length)
-const runningTaskCount = computed(() => tasks.value.filter((t) => ['PENDING', 'RUNNING', 'CANCELLING'].includes(t.status)).length)
+const selectedDocSet = computed(() => new Set(selectedDocIds.value))
+const selectedDocs = computed(() => visibleDocs.value.filter((d) => selectedDocSet.value.has(d.doc_id)))
+const selectedDocCount = computed(() => selectedDocs.value.length)
+const allVisibleDocsChecked = computed(() => visibleDocs.value.length > 0 && visibleDocs.value.every((d) => selectedDocSet.value.has(d.doc_id)))
+const batchEligibility = computed(() => {
+  const op = String(batchActionForm.operation || 'chunk')
+  const eligibleDocIds = []
+  const excluded = []
+  for (const doc of selectedDocs.value) {
+    if (isDocTaskLocked(doc)) {
+      const stage = docTaskState(doc)?.stage || String(doc?.status || '').toUpperCase()
+      excluded.push({
+        doc_id: doc.doc_id,
+        filename: doc.filename || doc.doc_id,
+        reason: `文档有运行中任务（${stageLabel(stage)}）`,
+      })
+      continue
+    }
+    if (op === 'embed' && Number(doc?.chunk_count || 0) <= 0) {
+      excluded.push({
+        doc_id: doc.doc_id,
+        filename: doc.filename || doc.doc_id,
+        reason: '需先切片（当前无 chunks）',
+      })
+      continue
+    }
+    eligibleDocIds.push(doc.doc_id)
+  }
+  return {
+    selectedCount: selectedDocs.value.length,
+    eligibleCount: eligibleDocIds.length,
+    excludedCount: excluded.length,
+    eligibleDocIds,
+    excluded,
+  }
+})
+const canRunBatchAction = computed(() => batchEligibility.value.eligibleCount > 0 && !!selectedKbId.value)
+const runningTaskCount = computed(() => tasks.value.filter((t) => isRunningTask({ status: effectiveTaskStatus(t) })).length)
 const latestTaskByDoc = computed(() => {
   const map = {}
   for (const task of tasks.value) {
@@ -207,6 +334,30 @@ const activeChunkMatchId = computed(() => {
   return chunkMatchIds.value[idx] || ''
 })
 const uploadWillChunk = computed(() => uploadProcessMode.value === 'UPLOAD_CLEAN_CHUNK_EMBED')
+const displayTasks = computed(() => {
+  const seenBatchParent = new Set()
+  const out = []
+  for (const t of tasks.value) {
+    const batchId = String(t?.batch_id || '')
+    const isParent = !!t?.batch_is_parent
+    if (batchId) {
+      if (isParent) {
+        seenBatchParent.add(batchId)
+        out.push(t)
+      }
+      continue
+    }
+    out.push(t)
+  }
+  // Backward compatibility: if old tasks have batch_id but no parent task present, show children.
+  for (const t of tasks.value) {
+    const batchId = String(t?.batch_id || '')
+    if (!batchId || !!t?.batch_is_parent) continue
+    if (seenBatchParent.has(batchId)) continue
+    out.push(t)
+  }
+  return out
+})
 
 function formatBytes(bytes) {
   const n = Number(bytes || 0)
@@ -379,8 +530,10 @@ function disableChunkScroll(chunkId) {
 }
 
 function pushNotice(type, message) {
+  const text = String(message || '').trim()
+  if (!text) return
   const id = `n-${Date.now()}-${noticeSeq++}`
-  notices.value = [{ id, type, message }, ...notices.value].slice(0, 4)
+  notices.value = [{ id, type, message: text }, ...notices.value].slice(0, 4)
   const ttl = type === 'error' ? 9000 : 5000
   setTimeout(() => {
     notices.value = notices.value.filter((n) => n.id !== id)
@@ -389,10 +542,21 @@ function pushNotice(type, message) {
 
 function taskTypeLabel(task) {
   const t = String(task?.task_type || '').toUpperCase()
+  if (t === 'BATCH_DOC_CHUNK') return '批量切片'
+  if (t === 'BATCH_DOC_EMBED') return '批量重嵌入'
+  if (t === 'BATCH_DOC_SUMMARIZE') return '批量总结'
+  if (t === 'BATCH_DOC_MOVE') return '批量移动'
+  if (t === 'BATCH_DOC_TAG') return '批量标签'
+  if (t === 'BATCH_DOC_DELETE') return '批量删除'
+  if (t === 'KB_SUMMARIZE') return '库总结'
   if (t === 'DOC_INGEST') return '上传处理'
   if (t === 'DOC_CHUNK') return '切片'
   if (t === 'DOC_RECHUNK') return '重切片'
   if (t === 'DOC_REINDEX') return '重建嵌入'
+  if (t === 'DOC_SUMMARIZE') return '总结'
+  if (t === 'DOC_MOVE') return '移动'
+  if (t === 'DOC_TAG') return '打标签'
+  if (t === 'DOC_DELETE') return '删除'
   if (t === 'CHUNK_COMMIT') return '提交草稿'
   if (t === 'DOC_UPLOAD') return '上传'
   return '处理'
@@ -412,9 +576,10 @@ function resolveTaskName(task) {
 function summarizeTask(task) {
   const name = resolveTaskName(task)
   const op = taskTypeLabel(task)
-  if (task.status === 'SUCCEEDED') return `${name} ${op}已完成`
-  if (task.status === 'FAILED') return `${name} ${op}失败: ${task.error_message || task.error_code || '执行异常'}`
-  if (task.status === 'CANCELLED') return `${name} ${op}已取消`
+  const status = effectiveTaskStatus(task)
+  if (status === 'SUCCEEDED') return `${name} ${op}已完成`
+  if (status === 'FAILED') return `${name} ${op}失败: ${task.error_message || task.error_code || '执行异常'}`
+  if (status === 'CANCELLED') return `${name} ${op}已取消`
   return ''
 }
 
@@ -434,13 +599,32 @@ function taskStatusClass(status) {
 }
 
 function taskRowClass(task) {
+  const effective = effectiveTaskStatus(task)
+  if (effective === 'CANCELLED' || effective === 'FAILED' || effective === 'SUCCEEDED') {
+    return taskStatusClass(effective)
+  }
   const stage = resolveTaskStage(task)
   if (stage === 'PARSING') return 'status-pending'
-  return taskStatusClass(effectiveTaskStatus(task))
+  return taskStatusClass(effective)
 }
 
 function isRunningTask(task) {
   return ['PENDING', 'RUNNING', 'CANCELLING'].includes(normalizeStatus(task?.status))
+}
+
+function canCancelTask(task) {
+  const s = normalizeStatus(effectiveTaskStatus(task))
+  return s === 'PENDING' || s === 'RUNNING'
+}
+
+function canRetryTask(task) {
+  const s = normalizeStatus(effectiveTaskStatus(task))
+  if (s !== 'FAILED') return false
+  if (retryLockedTaskIds.value[String(task?.task_id || '')]) return false
+  if (task?.batch_is_parent) return false
+  if (task?.batch_id) return false
+  const taskType = normalizeStatus(task?.task_type)
+  return ['DOC_INGEST', 'DOC_UPLOAD', 'DOC_CHUNK', 'DOC_REINDEX', 'DOC_SUMMARIZE', 'CHUNK_COMMIT', 'DOC_MOVE', 'DOC_TAG', 'DOC_DELETE'].includes(taskType)
 }
 
 function normalizeStage(task) {
@@ -458,11 +642,30 @@ function resolveTaskStage(task) {
 
 function effectiveTaskStatus(task) {
   const raw = normalizeStatus(task?.status)
+  const cancelRequested = Boolean(task?.cancel_requested)
+  if (cancelRequested && raw !== 'SUCCEEDED') return 'CANCELLED'
   if (!['PENDING', 'RUNNING', 'CANCELLING'].includes(raw)) return raw
   const stage = resolveTaskStage(task)
-  const hasActiveStage = ['UPLOADING', 'PARSING', 'CHUNKING', 'EMBEDDING', 'INDEXING'].includes(stage)
+  const hasActiveStage = [
+    'UPLOADING',
+    'PARSING',
+    'CHUNKING',
+    'SUMMARIZING',
+    'SUMMARIZING_DOC',
+    'SUMMARY_EMBEDDING_DOC',
+    'SUMMARIZING_KB',
+    'SUMMARY_EMBEDDING_KB',
+    'EMBEDDING',
+    'INDEXING',
+    'MOVING',
+    'TAGGING',
+    'DELETING',
+  ].includes(stage)
   if (stage === 'INDEXED') return 'SUCCEEDED'
+  if (stage === 'SUMMARIZED') return 'SUCCEEDED'
   if (stage === 'UPLOADED_RAW' || stage === 'CLEANED') return 'SUCCEEDED'
+  if (stage === 'MOVED' || stage === 'TAGGED') return 'SUCCEEDED'
+  if (stage === 'DELETED') return 'SUCCEEDED'
   if (hasActiveStage) return raw
   const docStatus = docStatusById.value[task?.doc_id || '']
   if (docStatus === 'UPLOADED_RAW' || docStatus === 'CLEANED') return 'SUCCEEDED'
@@ -477,16 +680,29 @@ function taskProgressLabel(task) {
   const stage = resolveTaskStage(task)
   const status = effectiveTaskStatus(task)
   const op = taskTypeLabel(task)
+  if (status === 'CANCELLED') return `${name} ${op}已取消`
+  if (status === 'FAILED') return `${name} ${op}失败`
+  if (status === 'SUCCEEDED') return `${name} ${op}已完成`
+  if (stage === 'BATCH_RUNNING') return `${name} ${op}：${taskStagePercentText(task, '处理中')}`
+  if (stage === 'BATCH_COMPLETED') return `${name} ${op}已完成`
+  if (stage === 'BATCH_FAILED') return `${name} ${op}失败`
   if (stage === 'UPLOADING') return `${name} 上传中`
   if (stage === 'PARSING') return `${name} ${op}：解析中`
   if (stage === 'CHUNKING') return `${name} ${op}：切片中`
+  if (stage === 'SUMMARIZING' || stage === 'SUMMARIZING_DOC') return `${name} ${op}：${taskStagePercentText(task, '文档总结中')}`
+  if (stage === 'SUMMARY_EMBEDDING_DOC') return `${name} ${op}：${taskStagePercentText(task, '总结嵌入中')}`
+  if (stage === 'SUMMARIZING_KB') return `${name} ${op}：${taskStagePercentText(task, '库总结中')}`
+  if (stage === 'SUMMARY_EMBEDDING_KB') return `${name} ${op}：${taskStagePercentText(task, '库总结嵌入中')}`
   if (stage === 'EMBEDDING') return `${name} ${op}：${taskEmbeddingProgressText(task, '嵌入中')}`
   if (stage === 'INDEXING') return `${name} ${op}：索引中`
+  if (stage === 'MOVING') return `${name} ${op}：移动中`
+  if (stage === 'TAGGING') return `${name} ${op}：打标签中`
+  if (stage === 'DELETING') return `${name} ${op}：删除中`
   if (stage === 'UPLOADED_RAW') return `${name} 已上传`
   if (stage === 'CLEANED') return `${name} 已清洗`
-  if (status === 'SUCCEEDED') return `${name} ${op}已完成`
-  if (status === 'FAILED') return `${name} ${op}失败`
-  if (status === 'CANCELLED') return `${name} ${op}已取消`
+  if (stage === 'MOVED') return `${name} 已移动`
+  if (stage === 'TAGGED') return `${name} 已打标签`
+  if (stage === 'DELETED') return `${name} 已删除`
   return `${name} ${op}处理中`
 }
 
@@ -498,16 +714,29 @@ function taskStatusText(task) {
   const stage = resolveTaskStage(task)
   const status = effectiveTaskStatus(task)
   const op = taskTypeLabel(task)
+  if (status === 'CANCELLED') return `${op}已取消`
+  if (status === 'FAILED') return `${op}失败`
+  if (status === 'SUCCEEDED') return `${op}已完成`
+  if (stage === 'BATCH_RUNNING') return `${op}：${taskStagePercentText(task, '处理中')}`
+  if (stage === 'BATCH_COMPLETED') return `${op}已完成`
+  if (stage === 'BATCH_FAILED') return `${op}失败`
   if (stage === 'UPLOADING') return '上传中'
   if (stage === 'PARSING') return `${op}：解析中`
   if (stage === 'CHUNKING') return `${op}：切片中`
+  if (stage === 'SUMMARIZING' || stage === 'SUMMARIZING_DOC') return `${op}：${taskStagePercentText(task, '文档总结中')}`
+  if (stage === 'SUMMARY_EMBEDDING_DOC') return `${op}：${taskStagePercentText(task, '总结嵌入中')}`
+  if (stage === 'SUMMARIZING_KB') return `${op}：${taskStagePercentText(task, '库总结中')}`
+  if (stage === 'SUMMARY_EMBEDDING_KB') return `${op}：${taskStagePercentText(task, '库总结嵌入中')}`
   if (stage === 'EMBEDDING') return `${op}：${taskEmbeddingPercentText(task, '嵌入中')}`
   if (stage === 'INDEXING') return `${op}：索引中`
+  if (stage === 'MOVING') return `${op}：移动中`
+  if (stage === 'TAGGING') return `${op}：打标签中`
+  if (stage === 'DELETING') return `${op}：删除中`
   if (stage === 'UPLOADED_RAW') return '已上传'
   if (stage === 'CLEANED') return '已清洗'
-  if (status === 'SUCCEEDED') return `${op}已完成`
-  if (status === 'FAILED') return `${op}失败`
-  if (status === 'CANCELLED') return `${op}已取消`
+  if (stage === 'MOVED') return '已移动'
+  if (stage === 'TAGGED') return '已打标签'
+  if (stage === 'DELETED') return '已删除'
   return `${op}处理中`
 }
 
@@ -526,6 +755,14 @@ function taskEmbeddingPercentText(task, fallback = '嵌入中') {
   if (!Number.isFinite(total) || total <= 0) return fallback
   const pct = Number.isFinite(pctRaw) ? Math.max(0, Math.min(100, Math.floor(pctRaw))) : 0
   return `嵌入中 ${pct}%`
+}
+
+function taskStagePercentText(task, fallback) {
+  const total = Number(task?.progress_total || 0)
+  const pctRaw = Number(task?.progress_pct || 0)
+  if (!Number.isFinite(total) || total <= 0) return fallback
+  const pct = Number.isFinite(pctRaw) ? Math.max(0, Math.min(100, Math.floor(pctRaw))) : 0
+  return `${fallback} ${pct}%`
 }
 
 function docEmbeddingProgress(doc) {
@@ -580,16 +817,60 @@ function docSequenceNo(doc) {
   return Number(docSequenceMap.value[doc.doc_id] || 0)
 }
 
+function displayDocName(name) {
+  const text = String(name || '')
+  const chars = Array.from(text)
+  if (chars.length <= 50) return text
+  return `${chars.slice(0, 50).join('')}...`
+}
+
+function toggleSelectAllVisibleDocs() {
+  if (allVisibleDocsChecked.value) {
+    const keep = selectedDocIds.value.filter((id) => !visibleDocs.value.some((d) => d.doc_id === id))
+    selectedDocIds.value = keep
+    return
+  }
+  const merged = new Set(selectedDocIds.value)
+  for (const doc of visibleDocs.value) merged.add(doc.doc_id)
+  selectedDocIds.value = Array.from(merged)
+}
+
+function toggleSelectDoc(docId) {
+  const set = new Set(selectedDocIds.value)
+  if (set.has(docId)) set.delete(docId)
+  else set.add(docId)
+  selectedDocIds.value = Array.from(set)
+}
+
+function clearSelectedDocs() {
+  selectedDocIds.value = []
+}
+
 function stageLabel(stage) {
   const s = String(stage || '').toUpperCase()
+  if (s === 'BATCH_RUNNING') return '批次处理中'
+  if (s === 'BATCH_COMPLETED') return '批次完成'
+  if (s === 'BATCH_FAILED') return '批次失败'
   if (s === 'UPLOADING') return '上传'
   if (s === 'PARSING') return '解析'
   if (s === 'CHUNKING') return '切片'
+  if (s === 'SUMMARIZING') return '总结'
+  if (s === 'SUMMARIZING_DOC') return '文档总结'
+  if (s === 'SUMMARY_EMBEDDING_DOC') return '文档总结嵌入'
+  if (s === 'SUMMARIZING_KB') return '库总结'
+  if (s === 'SUMMARY_EMBEDDING_KB') return '库总结嵌入'
   if (s === 'EMBEDDING') return '嵌入'
   if (s === 'INDEXING') return '索引'
+  if (s === 'MOVING') return '移动'
+  if (s === 'TAGGING') return '打标签'
+  if (s === 'DELETING') return '删除'
+  if (s === 'SUMMARIZED') return '已总结'
   if (s === 'INDEXED') return '完成'
   if (s === 'UPLOADED_RAW') return '已上传'
   if (s === 'CLEANED') return '已清洗'
+  if (s === 'MOVED') return '已移动'
+  if (s === 'TAGGED') return '已打标签'
+  if (s === 'DELETED') return '已删除'
   if (s === 'FAILED') return '失败'
   if (s === 'CANCELLED') return '取消'
   return s || '阶段'
@@ -626,7 +907,30 @@ function eventStatusRank(status) {
 }
 
 function buildTaskChildren(events) {
-  const stageOrder = ['UPLOADING', 'PARSING', 'CHUNKING', 'EMBEDDING', 'INDEXING', 'UPLOADED_RAW', 'CLEANED', 'INDEXED', 'FAILED', 'CANCELLED']
+  const stageOrder = [
+    'UPLOADING',
+    'PARSING',
+    'CHUNKING',
+    'SUMMARIZING',
+    'SUMMARIZING_DOC',
+    'SUMMARY_EMBEDDING_DOC',
+    'SUMMARIZING_KB',
+    'SUMMARY_EMBEDDING_KB',
+    'EMBEDDING',
+    'INDEXING',
+    'MOVING',
+    'TAGGING',
+    'DELETING',
+    'UPLOADED_RAW',
+    'CLEANED',
+    'SUMMARIZED',
+    'INDEXED',
+    'MOVED',
+    'TAGGED',
+    'DELETED',
+    'FAILED',
+    'CANCELLED',
+  ]
   const grouped = {}
   for (const evt of events || []) {
     const stage = String(evt?.stage || '').toUpperCase()
@@ -709,7 +1013,14 @@ async function toggleTaskExpand(task) {
   if (!taskId) return
   const next = !expandedTaskIds.value[taskId]
   expandedTaskIds.value = { ...expandedTaskIds.value, [taskId]: next }
-  if (next && !taskChildrenMap.value[taskId]) {
+  if (!next) return
+  if (task?.batch_is_parent && task?.batch_id) {
+    if (!batchDetailMap.value[task.batch_id]) {
+      await loadBatchDetails(task.batch_id)
+    }
+    return
+  }
+  if (!taskChildrenMap.value[taskId]) {
     await loadTaskChildren(taskId)
   }
 }
@@ -719,38 +1030,54 @@ function docTaskState(doc) {
   const docStatus = String(doc?.status || '').toUpperCase()
   if (!task && !docStatus) return null
   const stage = task ? resolveTaskStage(task) : docStatus
-  const status = task ? task.status : (['PARSING', 'CHUNKING', 'EMBEDDING', 'INDEXING', 'UPLOADING'].includes(stage) ? 'RUNNING' : 'SUCCEEDED')
+  const running = task ? isRunningTask(task) : false
+  const status = task ? task.status : 'SUCCEEDED'
   return {
     status,
     stage,
     cls: taskStatusClass(status),
-    running: task ? isRunningTask(task) : ['PARSING', 'CHUNKING', 'EMBEDDING', 'INDEXING', 'UPLOADING'].includes(stage),
-    chunking: ['PARSING', 'CHUNKING'].includes(stage),
-    embedding: ['EMBEDDING', 'INDEXING'].includes(stage),
+    running,
+    chunking: running && ['PARSING', 'CHUNKING'].includes(stage),
+    embedding: running && ['EMBEDDING', 'INDEXING'].includes(stage),
+    summarizing: running && ['SUMMARIZING', 'SUMMARIZING_DOC', 'SUMMARY_EMBEDDING_DOC', 'SUMMARIZING_KB', 'SUMMARY_EMBEDDING_KB'].includes(stage),
   }
 }
 
 function docPrimaryBadge(doc) {
-  const status = String(doc?.status || '').toUpperCase()
-  if (status === 'FAILED') return { text: 'failed', cls: 'badge-failed' }
-  if (status === 'CANCELLED') return { text: 'cancelled', cls: 'badge-muted' }
-  if (status === 'UPLOADED_RAW') return { text: 'raw only', cls: 'badge-muted' }
-  if (status === 'CLEANED') return { text: 'cleaned', cls: 'badge-info' }
-  if (status === 'UPLOADED') return { text: 'uploaded', cls: 'badge-info' }
-  if (doc?.embedding_dirty) return { text: 'needs re-embed', cls: 'badge-warn' }
+  if (isDocChunking(doc)) return { text: 'chunking', cls: 'badge-info' }
+  if (isDocEmbedding(doc)) return { text: 'embedding', cls: 'badge-info' }
+  if (isDocSummarizing(doc)) return { text: 'summarizing', cls: 'badge-info' }
+
+  const chunkCount = Number(doc?.chunk_count || 0)
+  const embeddedCount = Number(doc?.embedded_count || 0)
+  const hasSummary = !!String(doc?.summary_text || '').trim()
+
+  if (chunkCount <= 0) return { text: 'need chunk', cls: 'badge-warn' }
+  if (doc?.embedding_dirty || embeddedCount < chunkCount) return { text: 'need embed', cls: 'badge-warn' }
+  if (doc?.summary_dirty || !hasSummary) return { text: 'need summary', cls: 'badge-warn' }
   return { text: 'ok', cls: 'badge-ok' }
 }
 
 function chunkBadgeClass(doc) {
-  const status = String(doc?.status || '').toUpperCase()
-  if (status === 'FAILED') return 'badge-muted'
   return (doc?.chunk_count || 0) > 0 ? 'badge-info' : 'badge-muted'
 }
 
 function embeddedBadgeClass(doc) {
-  const status = String(doc?.status || '').toUpperCase()
-  if (status === 'FAILED') return 'badge-muted'
   return (doc?.embedded_count || 0) > 0 ? 'badge-success' : 'badge-muted'
+}
+
+function docSummaryPreview(doc) {
+  if (isDocSummarizing(doc)) return '总结中...'
+  const summary = String(doc?.summary_text || '').trim()
+  if (summary) return summary
+  return '-'
+}
+
+function summarizeActionLabel(doc) {
+  if (isDocSummarizing(doc)) return '总结中...'
+  if (doc?.summary_text && doc?.summary_dirty) return '重总结*'
+  if (doc?.summary_text) return '重总结'
+  return '总结'
 }
 
 function isDocChunking(doc) {
@@ -761,8 +1088,12 @@ function isDocEmbedding(doc) {
   return !!docTaskState(doc)?.embedding
 }
 
+function isDocSummarizing(doc) {
+  return !!docTaskState(doc)?.summarizing
+}
+
 function isDocTaskLocked(doc) {
-  return isDocChunking(doc) || isDocEmbedding(doc)
+  return isDocChunking(doc) || isDocEmbedding(doc) || isDocSummarizing(doc)
 }
 
 function getDocChunkMethod(doc) {
@@ -785,6 +1116,75 @@ function setDocChunkMethod(doc, method) {
   }
 }
 
+function normalizeTagList(tags) {
+  const out = []
+  const seen = new Set()
+  for (const t of tags || []) {
+    const v = String(t || '').trim()
+    if (!v) continue
+    const key = v.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(v)
+    if (out.length >= 10) break
+  }
+  return out
+}
+
+function openDocTagModal(doc) {
+  if (!doc?.doc_id) return
+  docTagModal.doc_id = String(doc.doc_id || '')
+  docTagModal.kb_id = String(doc.kb_id || selectedKbId.value || '')
+  docTagModal.filename = String(doc.filename || doc.doc_id || '')
+  docTagModal.tags = normalizeTagList(doc.tags_json || [])
+  docTagInput.value = ''
+  ui.showDocTagModal = true
+}
+
+function closeDocTagModal() {
+  ui.showDocTagModal = false
+  docTagInput.value = ''
+}
+
+function addDocTagChip() {
+  const next = normalizeTagList([...(docTagModal.tags || []), docTagInput.value])
+  if (next.length === (docTagModal.tags || []).length) {
+    if ((docTagModal.tags || []).length >= 10) {
+      pushNotice('warn', '最多支持 10 个标签')
+    }
+  }
+  docTagModal.tags = next
+  docTagInput.value = ''
+}
+
+function removeDocTagChip(idx) {
+  const arr = [...(docTagModal.tags || [])]
+  if (idx < 0 || idx >= arr.length) return
+  arr.splice(idx, 1)
+  docTagModal.tags = arr
+}
+
+async function saveDocTagModal() {
+  if (!docTagModal.doc_id || !docTagModal.kb_id) return
+  const tags = normalizeTagList(docTagModal.tags || [])
+  if (!tags.length) {
+    pushNotice('warn', '请至少保留一个标签')
+    return
+  }
+  try {
+    await callApi(`/api/v1/admin/kbs/${encodeURIComponent(docTagModal.kb_id)}/documents/${encodeURIComponent(docTagModal.doc_id)}/tags`, {
+      method: 'POST',
+      headers: withHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ mode: 'replace', tags }),
+    })
+    await loadDocs()
+    closeDocTagModal()
+    pushNotice('success', '标签已更新')
+  } catch (err) {
+    pushNotice('error', err instanceof Error ? err.message : String(err))
+  }
+}
+
 function refreshExpandedRunningTaskChildren() {
   const now = Date.now()
   for (const task of tasks.value) {
@@ -792,6 +1192,10 @@ function refreshExpandedRunningTaskChildren() {
     if (!taskId) continue
     if (!expandedTaskIds.value[taskId]) continue
     if (!isRunningTask({ status: effectiveTaskStatus(task) })) continue
+    if (task?.batch_is_parent && task?.batch_id) {
+      loadBatchDetails(task.batch_id, { silent: true }).catch(() => {})
+      continue
+    }
     const last = Number(taskChildrenRefreshAt.value[taskId] || 0)
     if (now - last < 1200) continue
     loadTaskChildren(taskId, { silent: true }).catch(() => {})
@@ -940,6 +1344,7 @@ function applyTaskUpdate(nextTasks) {
   }
   taskNameByTaskId.value = nextTaskNameMap
   const alive = new Set(tasks.value.map((t) => t.task_id))
+  const aliveBatches = new Set(tasks.value.filter((t) => !!t?.batch_id).map((t) => String(t.batch_id)))
   const nextChildren = {}
   const nextChildrenRefreshAt = {}
   for (const [taskId, list] of Object.entries(taskChildrenMap.value)) {
@@ -950,6 +1355,11 @@ function applyTaskUpdate(nextTasks) {
   }
   taskChildrenMap.value = nextChildren
   taskChildrenRefreshAt.value = nextChildrenRefreshAt
+  const nextBatchDetailMap = {}
+  for (const [batchId, detail] of Object.entries(batchDetailMap.value)) {
+    if (aliveBatches.has(batchId)) nextBatchDetailMap[batchId] = detail
+  }
+  batchDetailMap.value = nextBatchDetailMap
   const nextMap = {}
   const nextStageMap = {}
   let hasTaskChanged = false
@@ -969,13 +1379,17 @@ function applyTaskUpdate(nextTasks) {
     if (prevStatus === undefined) continue
     if (!taskStatusReady.value) continue
     if (prevStatus === currStatus) continue
+    if (task?.batch_id && !task?.batch_is_parent) continue
     const effective = effectiveTaskStatus(task)
+    const prevEffective = normalizeStatus(prevStatus)
     if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(effective)) {
       expandedTaskIds.value = { ...expandedTaskIds.value, [task.task_id]: false }
     }
-    if (currStatus === 'SUCCEEDED') pushNotice('success', summarizeTask(task))
-    if (currStatus === 'FAILED') pushNotice('error', summarizeTask(task))
-    if (currStatus === 'CANCELLED') pushNotice('warn', summarizeTask(task))
+    if (prevEffective !== effective) {
+      if (effective === 'SUCCEEDED') pushNotice('success', summarizeTask(task))
+      if (effective === 'FAILED') pushNotice('error', summarizeTask(task))
+      if (effective === 'CANCELLED') pushNotice('warn', summarizeTask(task))
+    }
   }
   if (Object.keys(taskStatusMap.value).length !== Object.keys(nextMap).length) {
     hasTaskChanged = true
@@ -1013,10 +1427,45 @@ async function parseJsonResponse(resp) {
   return { raw: await resp.text() }
 }
 
+function normalizeApiErrorMessage(data, status) {
+  const detail = data?.detail ?? data?.error ?? data?.raw
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (Array.isArray(detail) && detail.length) {
+    return detail
+      .map((x) => {
+        if (typeof x === 'string') return x
+        if (x && typeof x === 'object') {
+          const loc = Array.isArray(x.loc) ? x.loc.join('.') : ''
+          const msg = String(x.msg || x.message || '').trim()
+          if (loc && msg) return `${loc}: ${msg}`
+          if (msg) return msg
+          try {
+            return JSON.stringify(x)
+          } catch {
+            return String(x)
+          }
+        }
+        return String(x)
+      })
+      .filter(Boolean)
+      .join('; ')
+  }
+  if (detail && typeof detail === 'object') {
+    if (typeof detail.message === 'string' && detail.message.trim()) return detail.message
+    if (typeof detail.reason === 'string' && detail.reason.trim()) return detail.reason
+    try {
+      return JSON.stringify(detail)
+    } catch {
+      return String(detail)
+    }
+  }
+  return `Request failed: ${status}`
+}
+
 async function callApi(path, options = {}) {
   const resp = await fetch(`${config.executionBaseUrl}${path}`, options)
   const data = await parseJsonResponse(resp)
-  if (!resp.ok) throw new Error(data.detail || data.error || `Request failed: ${resp.status}`)
+  if (!resp.ok) throw new Error(normalizeApiErrorMessage(data, resp.status))
   return data
 }
 
@@ -1070,8 +1519,11 @@ function logout() {
   taskChildrenMap.value = {}
   taskChildrenLoading.value = {}
   taskChildrenRefreshAt.value = {}
+  batchDetailMap.value = {}
+  batchDetailLoading.value = {}
   expandedTaskIds.value = {}
   taskStatusReady.value = false
+  selectedDocIds.value = []
   selectedKbId.value = ''
   selectedDocId.value = ''
 }
@@ -1115,7 +1567,10 @@ async function loadKbs() {
   try {
     const data = await callApi('/api/v1/admin/kbs', { headers: withHeaders() })
     kbs.value = data.items || []
-    if (!selectedKbId.value && kbs.value.length) selectedKbId.value = kbs.value[0].kb_id
+    const hasSelected = kbs.value.some((kb) => kb.kb_id === selectedKbId.value)
+    if (!hasSelected) {
+      selectedKbId.value = kbs.value.length ? kbs.value[0].kb_id : ''
+    }
   } finally {
     loading.kbs = false
   }
@@ -1220,6 +1675,26 @@ async function confirmDeleteKb() {
   deleteKbForm.name = ''
 }
 
+async function summarizeKb(kb) {
+  if (!kb?.kb_id) return
+  if (Number(kb?.stats?.document_count || 0) <= 0) {
+    pushNotice('warn', '库内无文档，无法执行库总结')
+    return
+  }
+  try {
+    await callApi(`/api/v1/admin/kbs/${encodeURIComponent(kb.kb_id)}/summarize`, {
+      method: 'POST',
+      headers: withHeaders(),
+    })
+    kbMenuOpenId.value = ''
+    await loadTasks()
+    pushNotice('info', `已提交「${kb.name || kb.kb_id}」库总结任务`)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    pushNotice('error', msg)
+  }
+}
+
 async function loadDocs() {
   loading.docs = true
   try {
@@ -1244,6 +1719,8 @@ async function loadDocs() {
       pendingDocDeletes.value = Object.fromEntries(
         Object.entries(pendingDocDeletes.value).filter(([k]) => validKeys.has(k)),
       )
+      const validDocIds = new Set(allDocs.map((d) => d.doc_id))
+      selectedDocIds.value = selectedDocIds.value.filter((id) => validDocIds.has(id))
       return
     }
     const data = await callApi(`/api/v1/admin/kbs/${encodeURIComponent(selectedKbId.value)}/documents?limit=200`, {
@@ -1260,6 +1737,8 @@ async function loadDocs() {
     pendingDocDeletes.value = Object.fromEntries(
       Object.entries(pendingDocDeletes.value).filter(([k]) => validKeys.has(k)),
     )
+    const validDocIds = new Set((docs.value || []).map((d) => d.doc_id))
+    selectedDocIds.value = selectedDocIds.value.filter((id) => validDocIds.has(id))
   } finally {
     loading.docs = false
   }
@@ -1289,6 +1768,8 @@ async function clearTasks() {
     })
     const deletedTasks = Number(data?.result?.deleted_tasks || 0)
     const deletedEvents = Number(data?.result?.deleted_events || 0)
+    // Clear optimistic local-only tasks to avoid ghost rows reappearing after clear.
+    optimisticTaskMap.value = {}
     await loadTasks()
     if (deletedTasks > 0) {
       pushNotice('success', `已清空 ${deletedTasks} 条任务（事件 ${deletedEvents} 条）`)
@@ -1476,6 +1957,64 @@ async function cancelTask(taskId) {
   pushNotice('warn', '已请求取消任务')
 }
 
+async function commitDraftsForDoc(docId, kbId = null) {
+  const targetKbId = selectedKbId.value || kbId
+  if (!targetKbId || !docId) return
+  await callApi(
+    `/api/v1/admin/kbs/${encodeURIComponent(targetKbId)}/documents/${encodeURIComponent(docId)}/chunks/commit`,
+    {
+      method: 'POST',
+      headers: withHeaders(),
+    },
+  )
+  if (ui.currentView === 'chunks' && selectedDocId.value === docId) {
+    await loadChunks()
+  }
+  await loadDocs()
+  await loadTasks()
+}
+
+async function retryTask(task) {
+  const taskType = normalizeStatus(task?.task_type)
+  const taskId = String(task?.task_id || '')
+  const docId = task?.doc_id
+  const kbId = task?.kb_id || selectedKbId.value
+  if (!docId || !kbId) {
+    pushNotice('warn', '任务缺少文档或知识库信息，无法重试')
+    return
+  }
+  if (taskId) {
+    retryLockedTaskIds.value = { ...retryLockedTaskIds.value, [taskId]: true }
+  }
+  try {
+    if (taskType === 'DOC_CHUNK') {
+      await chunkDocument(docId, kbId)
+      return
+    }
+    if (taskType === 'DOC_REINDEX' || taskType === 'DOC_INGEST' || taskType === 'DOC_UPLOAD') {
+      await reindexDocument(docId, kbId)
+      return
+    }
+    if (taskType === 'DOC_SUMMARIZE') {
+      await summarizeDocument(docId, kbId)
+      return
+    }
+    if (taskType === 'CHUNK_COMMIT') {
+      await commitDraftsForDoc(docId, kbId)
+      pushNotice('info', '草稿提交重试已发起')
+      return
+    }
+    pushNotice('warn', '当前任务类型暂不支持重试')
+  } catch (err) {
+    if (taskId) {
+      const next = { ...retryLockedTaskIds.value }
+      delete next[taskId]
+      retryLockedTaskIds.value = next
+    }
+    pushNotice('error', err instanceof Error ? err.message : String(err))
+  }
+}
+
 async function deleteDocument(docId, kbId = null, silent = false) {
   const targetKbId = selectedKbId.value || kbId
   if (!targetKbId) return
@@ -1586,6 +2125,31 @@ async function reindexDocument(docId, kbId = null) {
   }
 }
 
+async function summarizeDocument(docId, kbId = null) {
+  const targetKbId = selectedKbId.value || kbId
+  if (!targetKbId) return
+  try {
+    await callApi(
+      `/api/v1/admin/kbs/${encodeURIComponent(targetKbId)}/documents/${encodeURIComponent(docId)}/summarize`,
+      {
+        method: 'POST',
+        headers: withHeaders(),
+      },
+    )
+    await loadTasks()
+    await loadDocs()
+    pushNotice('info', '总结任务已提交')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/not found/i.test(msg)) {
+      pushNotice('warn', '文档不存在或已被删除，已刷新文档列表')
+      await loadDocs()
+      return
+    }
+    pushNotice('error', msg)
+  }
+}
+
 async function chunkDocument(docId, kbId = null) {
   const targetKbId = selectedKbId.value || kbId
   if (!targetKbId) return
@@ -1620,6 +2184,154 @@ async function chunkDocument(docId, kbId = null) {
       return
     }
     pushNotice('error', msg)
+  }
+}
+
+function buildBatchRequestPayload() {
+  const op = String(batchActionForm.operation || 'chunk')
+  const base = {
+    operation: op,
+    doc_ids: batchEligibility.value.eligibleDocIds.slice(),
+  }
+  if (op === 'chunk') {
+    const payload = buildChunkPayload(batchActionForm.chunk_method, batchActionForm)
+    return {
+      ...base,
+      chunk_method: payload.chunk_method,
+      chunk_size: payload.chunk_size,
+      chunk_overlap: payload.chunk_overlap,
+      chunk_delimiter: payload.chunk_delimiter || null,
+    }
+  }
+  if (op === 'embed') {
+    return base
+  }
+  if (op === 'move') {
+    return { ...base, target_kb_id: (batchActionForm.target_kb_id || '').trim() }
+  }
+  if (op === 'tag') {
+    const tags = String(batchActionForm.tags_text || '')
+      .split(/[,\n，]/g)
+      .map((x) => x.trim())
+      .filter(Boolean)
+    return { ...base, tags }
+  }
+  return base
+}
+
+function openBatchActionModal() {
+  if (selectedDocCount.value <= 0 || !selectedKbId.value) {
+    pushNotice('info', '请先选择文档')
+    return
+  }
+  if (!batchActionForm.operation) batchActionForm.operation = 'chunk'
+  batchShowPrereqList.value = false
+  batchActionForm.chunk_method = chunkRunConfig.chunk_method
+  batchActionForm.chunk_size = chunkRunConfig.chunk_size
+  batchActionForm.chunk_overlap = chunkRunConfig.chunk_overlap
+  batchActionForm.chunk_delimiter = chunkRunConfig.chunk_delimiter
+  ui.showBatchModal = true
+}
+
+async function runBatchAction() {
+  if (!canRunBatchAction.value) {
+    if (batchEligibility.value.selectedCount > 0 && batchEligibility.value.eligibleCount <= 0) {
+      pushNotice('warn', '当前选中文档均不满足该批量操作条件，请先处理前置步骤')
+      return
+    }
+    pushNotice('info', '请先选择文档')
+    return
+  }
+  const payload = buildBatchRequestPayload()
+  if (payload.operation === 'chunk' && !validateChunkPayload(payload, '批量任务')) return
+  if (payload.operation === 'move' && !payload.target_kb_id) {
+    pushNotice('warn', '请选择目标知识库')
+    return
+  }
+  if (payload.operation === 'tag' && (!payload.tags || !payload.tags.length)) {
+    pushNotice('warn', '请填写至少一个标签')
+    return
+  }
+  try {
+    const excludedCount = Number(batchEligibility.value.excludedCount || 0)
+    const data = await callApi(`/api/v1/admin/kbs/${encodeURIComponent(selectedKbId.value)}/documents/batch`, {
+      method: 'POST',
+      headers: withHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(payload),
+    })
+    clearSelectedDocs()
+    await loadTasks()
+    await loadDocs()
+    if (payload.operation === 'move') {
+      await loadKbs()
+    }
+    ui.showBatchModal = false
+    const extraText = excludedCount > 0 ? `，排除 ${excludedCount}` : ''
+    pushNotice('info', `批量任务已提交：成功 ${Number(data.accepted_count || 0)}，失败 ${Number(data.failed_count || 0)}${extraText}`)
+    if (Array.isArray(data.failed) && data.failed.length > 0) {
+      const top = data.failed
+        .slice(0, 3)
+        .map((x) => `${x.filename || x.doc_id || '文档'}: ${x.reason || '失败'}`)
+        .join('；')
+      pushNotice('warn', `失败原因（部分）：${top}`)
+    }
+    if (data.batch_id) {
+      ui.showTaskDrawer = true
+    }
+  } catch (err) {
+    pushNotice('error', err instanceof Error ? err.message : String(err))
+  }
+}
+
+watch(
+  () => batchActionForm.operation,
+  () => {
+    batchShowPrereqList.value = false
+  },
+)
+
+async function loadBatchDetails(batchId, options = {}) {
+  if (!batchId) return
+  if (batchDetailLoading.value[batchId]) return
+  const silent = !!options.silent
+  if (!silent) {
+    batchDetailLoading.value = { ...batchDetailLoading.value, [batchId]: true }
+  }
+  try {
+    const data = await callApi(`/api/v1/admin/tasks/batches/${encodeURIComponent(batchId)}?limit=500`, {
+      headers: withHeaders(),
+    })
+    batchDetailMap.value = {
+      ...batchDetailMap.value,
+      [batchId]: { item: data.item || {}, items: (data.items || []).filter((x) => !x.batch_is_parent) },
+    }
+  } finally {
+    if (!silent) {
+      const next = { ...batchDetailLoading.value }
+      delete next[batchId]
+      batchDetailLoading.value = next
+    }
+  }
+}
+
+async function retryBatchFailed(batchId) {
+  if (!batchId) return
+  const key = String(batchId)
+  if (retryLockedBatchIds.value[key]) return
+  retryLockedBatchIds.value = { ...retryLockedBatchIds.value, [key]: true }
+  try {
+    await callApi(`/api/v1/admin/tasks/batches/${encodeURIComponent(batchId)}/retry-failed`, {
+      method: 'POST',
+      headers: withHeaders(),
+    })
+    await loadTasks()
+    await loadBatchDetails(batchId)
+    pushNotice('info', '已提交批次失败项重试')
+  } catch (err) {
+    const next = { ...retryLockedBatchIds.value }
+    delete next[key]
+    retryLockedBatchIds.value = next
+    pushNotice('error', err instanceof Error ? err.message : String(err))
   }
 }
 
@@ -1807,7 +2519,10 @@ watch(selectedKbId, () => {
   taskChildrenMap.value = {}
   taskChildrenLoading.value = {}
   taskChildrenRefreshAt.value = {}
+  batchDetailMap.value = {}
+  batchDetailLoading.value = {}
   expandedTaskIds.value = {}
+  selectedDocIds.value = []
   taskStatusReady.value = false
   if (isLoggedIn.value) connectTaskStream()
 })
@@ -1818,8 +2533,27 @@ watch(selectedDoc, (doc) => {
   applyDocChunkConfigToRun(doc)
 })
 
+watch(
+  [
+    selectedKbId,
+    kbSort,
+    docSort,
+    docStatusFilter,
+    docTagFilter,
+    kbSearch,
+    docSearch,
+    docTagSearch,
+    () => ui.sidebarCollapsed,
+    () => ui.showTaskDrawer,
+  ],
+  () => {
+    saveUiPrefs()
+  },
+)
+
 onMounted(() => {
   // Force login screen on every open to avoid stale token format conflicts.
+  loadUiPrefs()
   token.value = ''
   role.value = ''
 })
@@ -1974,13 +2708,21 @@ function addUploadFiles(files) {
           v-for="kb in visibleKbs"
           :key="kb.kb_id"
           class="list-item kb-card"
-          :class="{ active: kb.kb_id === selectedKbId }"
+          :class="{ active: kb.kb_id === selectedKbId, 'menu-open': kbMenuOpenId === kb.kb_id }"
           @click="selectedKbId = kb.kb_id; loadDocs(); loadTasks(); kbMenuOpenId = ''"
         >
           <div class="list-row kb-card-head">
             <strong class="list-title">{{ kb.name }}</strong>
             <button class="btn ghost kb-menu-btn" @click.stop="toggleKbMenu(kb.kb_id)" title="库菜单">⋯</button>
             <div v-if="kbMenuOpenId === kb.kb_id" class="kb-card-menu" @click.stop>
+              <button
+                class="btn ghost kb-card-menu-item"
+                :disabled="Number(kb.stats?.document_count || 0) <= 0"
+                :title="Number(kb.stats?.document_count || 0) <= 0 ? '库内无文档，无法总结' : ''"
+                @click.stop="summarizeKb(kb)"
+              >
+                库总结
+              </button>
               <button class="btn ghost kb-card-menu-item" @click.stop="openRenameKbModal(kb)">Rename</button>
               <button class="btn ghost btn-danger kb-card-menu-item" @click.stop="requestDeleteKb(kb)">Delete</button>
             </div>
@@ -1993,7 +2735,15 @@ function addUploadFiles(files) {
             <span>size: {{ formatBytes(kb.stats?.total_size_bytes) }}</span>
             <span>words: {{ kb.stats?.total_words || 0 }}</span>
           </div>
-          <div class="meta summary-line truncated kb-summary">summary: {{ kb.summary || "-" }}</div>
+          <div
+            class="meta summary-line truncated kb-summary"
+            :class="{ 'kb-summary-dirty': kb.summary_dirty }"
+            :title="kb.summary || '-'"
+          >
+            summary: {{ kb.summary || "-" }}
+          </div>
+          <div v-if="Number(kb.stats?.document_count || 0) <= 0" class="meta kb-summary-empty">库内无文档，已清空总结</div>
+          <div v-else-if="kb.summary_dirty" class="meta kb-summary-empty">文档或文档总结已变化，请重新库总结</div>
         </div>
       </div>
     </aside>
@@ -2012,6 +2762,22 @@ function addUploadFiles(files) {
         <div class="panel-header panel-header-tight">
           <div class="stack-row doc-filter-row">
             <input class="doc-filter-search" v-model="docSearch" placeholder="Search docs" />
+            <select class="doc-filter-sort" v-model="docStatusFilter" title="状态筛选">
+              <option value="all">状态：全部</option>
+              <option value="processing">状态：处理中</option>
+              <option value="need_chunk">状态：需切片</option>
+              <option value="need_embed">状态：需嵌入</option>
+              <option value="need_summary">状态：需总结</option>
+              <option value="ok">状态：已就绪</option>
+              <option value="failed">状态：失败</option>
+              <option value="cancelled">状态：已取消</option>
+            </select>
+            <select class="doc-filter-sort" v-model="docTagFilter" title="标签筛选">
+              <option value="all">标签：全部</option>
+              <option value="has">标签：有标签</option>
+              <option value="none">标签：无标签</option>
+            </select>
+            <input class="doc-filter-search doc-tag-search" v-model="docTagSearch" placeholder="Search tags" />
             <select class="doc-filter-sort" v-model="docSort">
               <option value="order_desc"># 序号 ↓</option>
               <option value="order_asc"># 序号 ↑</option>
@@ -2025,6 +2791,17 @@ function addUploadFiles(files) {
               提交修改（{{ pendingDocDeleteCount }}）
               </button>
             </div>
+          </div>
+        </div>
+        <div class="panel-header panel-header-tight">
+          <div class="stack-row batch-toolbar-row">
+            <label class="batch-check-all">
+              <input type="checkbox" :checked="allVisibleDocsChecked" @change="toggleSelectAllVisibleDocs" />
+              <span>全选当前列表</span>
+            </label>
+            <span class="batch-selected-text">已选 {{ selectedDocCount }} 项</span>
+            <button class="btn ghost" :disabled="selectedDocCount === 0" @click="clearSelectedDocs">清空选择</button>
+            <button class="btn primary" :disabled="!canRunBatchAction" @click="openBatchActionModal">批量操作</button>
           </div>
         </div>
 
@@ -2046,8 +2823,29 @@ function addUploadFiles(files) {
           >
             <div class="doc-card-head">
               <div class="list-row doc-title-row">
+                <label class="doc-select-check" @click.stop>
+                  <input
+                    type="checkbox"
+                    :checked="selectedDocSet.has(doc.doc_id)"
+                    @change.stop="toggleSelectDoc(doc.doc_id)"
+                  />
+                </label>
                 <span class="doc-seq">#{{ docSequenceNo(doc) }}</span>
-                <strong class="list-title" :title="doc.filename">{{ doc.filename }}</strong>
+                <span
+                  v-if="isDocTaskLocked(doc)"
+                  class="doc-lock-indicator"
+                  :title="`运行中：${stageLabel(docTaskState(doc)?.stage || String(doc?.status || '').toUpperCase())}`"
+                >
+                  🔒
+                </span>
+                <strong class="list-title doc-title-text" :title="doc.filename">{{ displayDocName(doc.filename) }}</strong>
+                <span class="tag-row doc-title-tags" @click.stop>
+                  <span v-if="!(doc.tags_json || []).length" class="badge badge-muted">无标签</span>
+                  <span v-for="tag in (doc.tags_json || []).slice(0, 10)" :key="`${doc.doc_id}-head-tag-${tag}`" class="badge badge-info">
+                    #{{ tag }}
+                  </span>
+                  <span v-if="(doc.tags_json || []).length > 10" class="badge badge-muted">+{{ (doc.tags_json || []).length - 10 }}</span>
+                </span>
               </div>
               <div v-if="!selectedKbId" class="meta doc-card-subtle">library: {{ doc.kb_name || doc.kb_id }}</div>
             </div>
@@ -2062,6 +2860,13 @@ function addUploadFiles(files) {
                 embedded {{ doc.embedded_count || 0 }}
               </span>
             </div>
+            <div
+              class="meta summary-line truncated doc-summary-preview"
+              :title="docSummaryPreview(doc)"
+            >
+              summary: {{ docSummaryPreview(doc) }}
+            </div>
+            <div v-if="doc.summary_dirty" class="meta doc-summary-dirty">内容已修改，未重新总结</div>
             <div class="doc-card-divider"></div>
             <div class="doc-actions">
               <button
@@ -2097,6 +2902,20 @@ function addUploadFiles(files) {
               >
                 <span v-if="isDocEmbedding(doc)" class="mini-spinner"></span>
                 <span>{{ docEmbeddingProgressLabel(doc) }}</span>
+              </button>
+              <button
+                class="btn ghost"
+                :disabled="isDocTaskLocked(doc)"
+                @click.stop="openDocTagModal(doc)"
+              >
+                Tag
+              </button>
+              <button
+                class="btn ghost"
+                :disabled="isDocTaskLocked(doc)"
+                @click.stop="summarizeDocument(doc.doc_id, doc.kb_id)"
+              >
+                {{ summarizeActionLabel(doc) }}
               </button>
               <button
                 class="btn ghost"
@@ -2139,6 +2958,10 @@ function addUploadFiles(files) {
                   <span class="v">{{ chunkRunConfig.chunk_delimiter || '(empty)' }}</span>
                 </span>
               </template>
+              <span class="chunk-param-chip">
+                <span class="k">Words</span>
+                <span class="v">{{ Number(selectedDoc?.word_count || 0) > 0 ? Number(selectedDoc?.word_count || 0) : String(selectedDoc?.raw_text || '').split(/\s+/).filter(Boolean).length }}</span>
+              </span>
             </span>
           </div>
           <div class="chunk-control-row">
@@ -2250,7 +3073,7 @@ function addUploadFiles(files) {
     <button class="task-fab" :class="{ active: ui.showTaskDrawer }" @click="ui.showTaskDrawer = !ui.showTaskDrawer">
       <span v-if="runningTaskCount > 0" class="fab-spinner"></span>
       <span v-else class="fab-dot"></span>
-      <span class="fab-count">{{ tasks.length }}</span>
+      <span class="fab-count">{{ displayTasks.length }}</span>
     </button>
 
     <aside v-if="ui.showTaskDrawer" class="task-drawer">
@@ -2264,8 +3087,8 @@ function addUploadFiles(files) {
         </div>
       </div>
       <div class="task-drawer-list">
-        <div v-if="!tasks.length" class="task-item status-unknown">暂无任务</div>
-        <article v-for="task in tasks" :key="task.task_id" class="task-item" :class="taskRowClass(task)">
+        <div v-if="!displayTasks.length" class="task-item status-unknown">暂无任务</div>
+        <article v-for="task in displayTasks" :key="task.task_id" class="task-item" :class="taskRowClass(task)">
           <div class="task-line">
             <span class="task-icon-slot">
               <span v-if="isRunningTask({ status: effectiveTaskStatus(task) })" class="mini-spinner"></span>
@@ -2287,6 +3110,14 @@ function addUploadFiles(files) {
             <span class="task-status">{{ taskStatusText(task) }}</span>
             <span class="task-time">{{ formatTaskTime(task.updated_at || task.created_at) }}</span>
             <button
+              class="btn ghost task-cancel-btn"
+              :disabled="!(canCancelTask(task) || canRetryTask(task))"
+              :title="retryLockedTaskIds[String(task.task_id || '')] ? '已提交重试' : (canRetryTask(task) ? '重试任务' : '取消任务')"
+              @click.stop="canRetryTask(task) ? retryTask(task) : cancelTask(task.task_id)"
+            >
+              {{ retryLockedTaskIds[String(task.task_id || '')] ? '已重试' : (canRetryTask(task) ? '重试' : '取消') }}
+            </button>
+            <button
               class="btn ghost task-expand-btn"
               :title="expandedTaskIds[task.task_id] ? '收起' : '展开'"
               @click="toggleTaskExpand(task)"
@@ -2295,14 +3126,41 @@ function addUploadFiles(files) {
             </button>
           </div>
           <div v-if="expandedTaskIds[task.task_id]" class="task-children">
-            <div v-if="taskChildrenLoading[task.task_id]" class="task-child child-running">加载中...</div>
-            <div v-else-if="!(taskChildrenMap[task.task_id] || []).length" class="task-child child-unknown">暂无子任务记录</div>
-            <div v-for="child in (taskChildrenMap[task.task_id] || [])" :key="child.key" class="task-child" :class="child.cls">
-              <span class="task-child-label">
-                {{ child.label }}<span v-if="child.progressText"> {{ child.progressText }}</span>
-              </span>
-              <span class="task-child-time">{{ formatTaskTime(child.ts) }}</span>
-            </div>
+            <template v-if="task.batch_is_parent && task.batch_id">
+              <div v-if="batchDetailLoading[task.batch_id]" class="task-child child-running">加载中...</div>
+              <div v-else class="task-child batch-summary">
+                <span class="task-child-label">
+                  成功 {{ batchDetailMap[task.batch_id]?.item?.succeeded_items || 0 }} / 失败 {{ batchDetailMap[task.batch_id]?.item?.failed_items || 0 }} / 运行中 {{ batchDetailMap[task.batch_id]?.item?.running_items || 0 }}
+                </span>
+                <button
+                  class="btn ghost btn-xs"
+                  :disabled="retryLockedBatchIds[String(task.batch_id || '')] || Number(batchDetailMap[task.batch_id]?.item?.failed_items || 0) <= 0 || isRunningTask({ status: effectiveTaskStatus(task) })"
+                  @click.stop="retryBatchFailed(task.batch_id)"
+                >
+                  {{ retryLockedBatchIds[String(task.batch_id || '')] ? '已重试' : '重试失败项' }}
+                </button>
+              </div>
+              <div v-if="!(batchDetailMap[task.batch_id]?.items || []).length" class="task-child child-unknown">暂无批次子任务</div>
+              <div
+                v-for="childTask in (batchDetailMap[task.batch_id]?.items || [])"
+                :key="childTask.task_id"
+                class="task-child"
+                :class="taskStatusClass(effectiveTaskStatus(childTask))"
+              >
+                <span class="task-child-label">{{ taskDisplayName(childTask) }} - {{ taskStatusText(childTask) }}</span>
+                <span class="task-child-time">{{ formatTaskTime(childTask.updated_at || childTask.created_at) }}</span>
+              </div>
+            </template>
+            <template v-else>
+              <div v-if="taskChildrenLoading[task.task_id]" class="task-child child-running">加载中...</div>
+              <div v-else-if="!(taskChildrenMap[task.task_id] || []).length" class="task-child child-unknown">暂无子任务记录</div>
+              <div v-for="child in (taskChildrenMap[task.task_id] || [])" :key="child.key" class="task-child" :class="child.cls">
+                <span class="task-child-label">
+                  {{ child.label }}<span v-if="child.progressText"> {{ child.progressText }}</span>
+                </span>
+                <span class="task-child-time">{{ formatTaskTime(child.ts) }}</span>
+              </div>
+            </template>
           </div>
         </article>
       </div>
@@ -2413,6 +3271,134 @@ function addUploadFiles(files) {
         <div class="stack-row actions-right">
           <button class="btn primary" @click="uploadDocument" :disabled="loading.upload || !uploadQueue.length">提交入库</button>
           <button class="btn ghost" @click="ui.showUploadModal = false">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="ui.showBatchModal" class="modal" @mousedown.self="ui.showBatchModal = false">
+      <div class="modal-card" @keydown.enter.prevent="runBatchAction">
+        <div class="panel-header">
+          <strong>批量操作（{{ selectedDocCount }} 项）</strong>
+        </div>
+        <div class="meta">
+          当前选中 {{ batchEligibility.selectedCount }} 条文档，
+          可直接执行 {{ batchEligibility.eligibleCount }} 条
+          <template v-if="batchEligibility.excludedCount > 0">
+            ，{{ batchEligibility.excludedCount }} 条需额外操作
+            <button class="btn-link-inline" @click="batchShowPrereqList = !batchShowPrereqList">
+              {{ batchShowPrereqList ? '收起' : '查看' }}
+            </button>
+          </template>
+        </div>
+        <div v-if="batchShowPrereqList && batchEligibility.excludedCount > 0" class="batch-prereq-list">
+          <div v-for="item in batchEligibility.excluded" :key="item.doc_id" class="batch-prereq-item">
+            <span class="name" :title="item.filename">{{ item.filename }}</span>
+            <span class="reason">{{ item.reason }}</span>
+          </div>
+        </div>
+        <div class="stack-col">
+          <label class="field field-tight">
+            操作类型
+            <select v-model="batchActionForm.operation">
+              <option value="chunk">批量重切片</option>
+              <option value="embed">批量重嵌入</option>
+              <option value="summarize">批量重总结</option>
+              <option value="move">批量移动文档</option>
+              <option value="tag">批量打标签</option>
+              <option value="delete">批量删除</option>
+            </select>
+          </label>
+          <template v-if="batchActionForm.operation === 'chunk'">
+            <label class="field field-tight">
+              Chunk 方法
+              <select v-model="batchActionForm.chunk_method">
+                <option value="fixed">fixed</option>
+                <option value="sentence">sentence（默认）</option>
+                <option value="paragraph">paragraph</option>
+                <option value="markdown">markdown</option>
+                <option value="delimiter">delimiter（按分隔符）</option>
+              </select>
+            </label>
+            <label class="field field-tight">
+              Chunk 大小
+              <input
+                v-model.number="batchActionForm.chunk_size"
+                type="number"
+                min="32"
+                max="4000"
+                step="1"
+                :disabled="isDelimiterMethod(batchActionForm.chunk_method)"
+              />
+            </label>
+            <label class="field field-tight">
+              Chunk Overlap
+              <input
+                v-model.number="batchActionForm.chunk_overlap"
+                type="number"
+                min="0"
+                max="1000"
+                step="1"
+                :disabled="isDelimiterMethod(batchActionForm.chunk_method)"
+              />
+            </label>
+            <label v-if="isDelimiterMethod(batchActionForm.chunk_method)" class="field field-tight">
+              分隔符（支持 \n / \t）
+              <input
+                v-model="batchActionForm.chunk_delimiter"
+                placeholder="例如：\n\n 或 ###"
+              />
+            </label>
+          </template>
+          <label v-if="batchActionForm.operation === 'move'" class="field field-tight">
+            目标知识库
+            <select v-model="batchActionForm.target_kb_id">
+              <option value="">选择目标知识库</option>
+              <option v-for="kb in kbs" :key="kb.kb_id" :value="kb.kb_id" :disabled="kb.kb_id === selectedKbId">{{ kb.name }}</option>
+            </select>
+          </label>
+          <label v-if="batchActionForm.operation === 'tag'" class="field field-tight">
+            标签（逗号分隔）
+            <input v-model="batchActionForm.tags_text" placeholder="例如：教材, 已审核" />
+          </label>
+        </div>
+        <div class="stack-row actions-right">
+          <button class="btn primary" :disabled="!canRunBatchAction" @click="runBatchAction">执行批量操作</button>
+          <button class="btn ghost" @click="ui.showBatchModal = false">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="ui.showDocTagModal" class="modal" @mousedown.self="closeDocTagModal">
+      <div class="modal-card doc-tag-modal" @keydown.enter.prevent="addDocTagChip">
+        <div class="panel-header">
+          <strong>文档标签</strong>
+        </div>
+        <div class="meta truncated" :title="docTagModal.filename">{{ docTagModal.filename }}</div>
+        <div class="doc-tag-edit-row">
+          <input
+            v-model="docTagInput"
+            class="doc-tag-modal-input"
+            placeholder="输入标签后点击 +"
+            maxlength="40"
+          />
+          <button class="btn ghost icon-btn" @click="addDocTagChip" :disabled="!docTagInput.trim()">+</button>
+        </div>
+        <div class="doc-tag-chip-board">
+          <div v-if="!(docTagModal.tags || []).length" class="meta">暂无标签</div>
+          <div
+            v-for="(tag, idx) in (docTagModal.tags || [])"
+            :key="`doc-tag-${idx}-${tag}`"
+            class="doc-tag-chip"
+            :title="tag"
+          >
+            <span class="text">#{{ tag }}</span>
+            <button class="remove" @click="removeDocTagChip(idx)">x</button>
+          </div>
+        </div>
+        <div class="meta">最多 10 个标签</div>
+        <div class="stack-row actions-right">
+          <button class="btn primary" @click="saveDocTagModal" :disabled="!(docTagModal.tags || []).length">保存标签</button>
+          <button class="btn ghost" @click="closeDocTagModal">取消</button>
         </div>
       </div>
     </div>
