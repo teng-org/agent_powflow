@@ -57,6 +57,33 @@ FastAPI 接口层，对接知识库管理前端与运行时。
 - `POST /api/v1/admin/api-pool/{endpoint_id}/set-default`
 - `POST /api/v1/admin/api-pool/reload-default`
 
+### API Token 用量统计（30 天）
+
+- `GET /api/v1/admin/usage/api-tokens/summary`
+- `GET /api/v1/admin/usage/api-tokens/events`
+- `GET /api/v1/admin/usage/api-tokens/budgets`
+- `PUT /api/v1/admin/usage/api-tokens/budgets`
+- `DELETE /api/v1/admin/usage/api-tokens/budgets/{budget_id}`
+- `POST /api/v1/admin/usage/api-tokens/budgets/evaluate`
+- `GET /api/v1/admin/usage/api-tokens/alerts`
+- `PATCH /api/v1/admin/usage/api-tokens/alerts/{alert_id}`
+- 统计维度包含：
+  - `kb_id`
+  - `API`（`api_path`，如 `/embeddings`、`/chat/completions`）
+  - `model`
+  - `api_key_fingerprint`（API Key 指纹，非明文）
+  - `task_category`（如 `doc_embedding`、`summary_llm`、`query_embedding`）
+  - `day`（UTC 按天）
+- 费用估算：
+  - 每条请求记录 `estimated_cost_usd`
+  - 优先读取 API 池端点价格（`input_per_1k` / `output_per_1k`）
+  - 若端点未配置价格，则回退到 `runtime-config.json` 的 `api_model_pricing`
+- 预算与告警：
+  - 支持 `TENANT / KB / MODEL / TASK_CATEGORY` 四类 scope
+  - 支持 `daily_token_limit` 与 `daily_cost_limit`
+  - 超限触发告警并进入 `OPEN` 状态，可 `ACK/RESOLVED`
+- 保留策略：仅保留最近 30 天数据（自动清理）。
+
 ## 鉴权与上下文
 
 - 管理员登录后使用 `Authorization: Bearer <access_token>` 调用后台接口。

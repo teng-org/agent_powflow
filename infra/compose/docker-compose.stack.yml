@@ -110,6 +110,7 @@ services:
       CELERY_RESULT_BACKEND: rpc://
     volumes:
       - ../../logs:/app/logs
+      - ../../config:/app/config:ro
     depends_on:
       - rabbitmq
       - postgres
@@ -145,6 +146,8 @@ services:
       - rabbitmq
       - execution-api
       - postgres
+    volumes:
+      - ../../config:/app/config:ro
 
 volumes:
   postgres_data:

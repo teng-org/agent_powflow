@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Any
 
 import psycopg
@@ -24,9 +25,13 @@ class ApiPoolMongoStore:
     Storage has been migrated from MongoDB to PostgreSQL.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, namespace: str = "api_pool") -> None:
         self.dsn = _postgres_dsn()
         self._initialized = False
+        raw = (namespace or "api_pool").strip().lower()
+        self.namespace = re.sub(r"[^a-z0-9_]", "_", raw) or "api_pool"
+        self.settings_table = f"{self.namespace}_settings"
+        self.endpoints_table = f"{self.namespace}_endpoints"
 
     def _connect(self):
         return psycopg.connect(self.dsn, autocommit=True, row_factory=dict_row)
@@ -36,19 +41,19 @@ class ApiPoolMongoStore:
             return
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS api_pool_settings (
+                f"""
+                CREATE TABLE IF NOT EXISTS {self.settings_table} (
                     settings_key TEXT PRIMARY KEY,
                     default_endpoint_id TEXT NULL,
-                    default_endpoint_ids JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    default_endpoint_ids JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
                 """
             )
             cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS api_pool_endpoints (
+                f"""
+                CREATE TABLE IF NOT EXISTS {self.endpoints_table} (
                     endpoint_id TEXT PRIMARY KEY,
                     payload JSONB NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -62,9 +67,9 @@ class ApiPoolMongoStore:
         self._ensure_schema()
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT default_endpoint_id, default_endpoint_ids
-                FROM api_pool_settings
+                FROM {self.settings_table}
                 WHERE settings_key = 'global'
                 """
             )
@@ -73,7 +78,7 @@ class ApiPoolMongoStore:
                 "default_endpoint_id": row.get("default_endpoint_id"),
                 "default_endpoint_ids": row.get("default_endpoint_ids") or {},
             }
-            cur.execute("SELECT payload FROM api_pool_endpoints ORDER BY created_at ASC")
+            cur.execute(f"SELECT payload FROM {self.endpoints_table} ORDER BY created_at ASC")
             endpoints = [dict(r.get("payload") or {}) for r in cur.fetchall()]
             return settings, endpoints
 
@@ -81,8 +86,8 @@ class ApiPoolMongoStore:
         self._ensure_schema()
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                """
-                INSERT INTO api_pool_settings (settings_key, default_endpoint_id, default_endpoint_ids, updated_at)
+                f"""
+                INSERT INTO {self.settings_table} (settings_key, default_endpoint_id, default_endpoint_ids, updated_at)
                 VALUES ('global', %s, %s::jsonb, NOW())
                 ON CONFLICT (settings_key) DO UPDATE SET
                     default_endpoint_id = EXCLUDED.default_endpoint_id,
@@ -94,11 +99,11 @@ class ApiPoolMongoStore:
                     json.dumps(settings.get("default_endpoint_ids") or {}, ensure_ascii=False),
                 ),
             )
-            cur.execute("DELETE FROM api_pool_endpoints")
+            cur.execute(f"DELETE FROM {self.endpoints_table}")
             for endpoint in endpoints:
                 cur.execute(
-                    """
-                    INSERT INTO api_pool_endpoints (endpoint_id, payload, updated_at)
+                    f"""
+                    INSERT INTO {self.endpoints_table} (endpoint_id, payload, updated_at)
                     VALUES (%s, %s::jsonb, NOW())
                     ON CONFLICT (endpoint_id) DO UPDATE SET
                         payload = EXCLUDED.payload,
@@ -114,8 +119,8 @@ class ApiPoolMongoStore:
         self._ensure_schema()
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                """
-                INSERT INTO api_pool_endpoints (endpoint_id, payload, updated_at)
+                f"""
+                INSERT INTO {self.endpoints_table} (endpoint_id, payload, updated_at)
                 VALUES (%s, %s::jsonb, NOW())
                 ON CONFLICT (endpoint_id) DO UPDATE SET
                     payload = EXCLUDED.payload,
@@ -127,14 +132,14 @@ class ApiPoolMongoStore:
     def delete_endpoint(self, endpoint_id: str) -> None:
         self._ensure_schema()
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM api_pool_endpoints WHERE endpoint_id = %s", (endpoint_id,))
+            cur.execute(f"DELETE FROM {self.endpoints_table} WHERE endpoint_id = %s", (endpoint_id,))
 
     def update_defaults(self, default_endpoint_id: str | None, default_endpoint_ids: dict[str, str]) -> None:
         self._ensure_schema()
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                """
-                INSERT INTO api_pool_settings (settings_key, default_endpoint_id, default_endpoint_ids, updated_at)
+                f"""
+                INSERT INTO {self.settings_table} (settings_key, default_endpoint_id, default_endpoint_ids, updated_at)
                 VALUES ('global', %s, %s::jsonb, NOW())
                 ON CONFLICT (settings_key) DO UPDATE SET
                     default_endpoint_id = EXCLUDED.default_endpoint_id,

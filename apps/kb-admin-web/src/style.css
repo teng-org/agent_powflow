@@ -271,6 +271,12 @@ select {
   min-width: 220px;
 }
 
+.doc-tag-search {
+  flex: 0 0 180px;
+  width: 180px;
+  min-width: 150px;
+}
+
 .doc-filter-sort {
   flex: 0 0 180px;
   width: 180px;
@@ -285,10 +291,10 @@ select {
   justify-content: flex-end;
 }
 
-.admin-layout input,
+.admin-layout input:not([type="checkbox"]):not([type="radio"]),
 .admin-layout select,
 .admin-layout textarea,
-.field input,
+.field input:not([type="checkbox"]):not([type="radio"]),
 .field textarea {
   padding: 6px 10px;
   min-height: 30px;
@@ -300,10 +306,10 @@ select {
   width: 100%;
 }
 
-.admin-layout input:focus,
+.admin-layout input:not([type="checkbox"]):not([type="radio"]):focus,
 .admin-layout select:focus,
 .admin-layout textarea:focus,
-.field input:focus,
+.field input:not([type="checkbox"]):not([type="radio"]):focus,
 .field textarea:focus {
   border-color: #d39a76;
   box-shadow: 0 0 0 2px rgba(211, 154, 118, 0.18);
@@ -348,12 +354,17 @@ select {
   box-shadow: 0 1px 0 rgba(201, 168, 132, 0.1);
   transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
   position: relative;
+  z-index: 1;
 }
 
 .kb-card:hover {
   border-color: #d5b594;
   box-shadow: 0 5px 14px rgba(132, 94, 60, 0.12);
   transform: translateY(-1px);
+}
+
+.kb-card.menu-open {
+  z-index: 30;
 }
 
 .kb-card-head .list-title {
@@ -381,7 +392,7 @@ select {
   position: absolute;
   top: 30px;
   right: 0;
-  z-index: 6;
+  z-index: 40;
   display: grid;
   gap: 6px;
   min-width: 128px;
@@ -418,6 +429,16 @@ select {
 
 .kb-summary {
   margin-top: 4px;
+}
+
+.kb-summary-dirty {
+  color: #b66a2d;
+}
+
+.kb-summary-empty {
+  margin-top: 2px;
+  font-size: 0.82rem;
+  color: #9a8165;
 }
 
 .kb-card-all {
@@ -500,6 +521,78 @@ select {
   margin-top: 4px;
 }
 
+.doc-tag-display-row {
+  margin-top: 6px;
+}
+
+.doc-summary-preview {
+  margin-top: 6px;
+  color: #746759;
+}
+
+.doc-tag-modal {
+  width: min(560px, 92vw);
+}
+
+.doc-tag-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.doc-tag-modal-input {
+  flex: 1;
+}
+
+.doc-tag-chip-board {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px;
+  border: 1px solid #e6dacc;
+  border-radius: 10px;
+  background: #fffdfa;
+}
+
+.doc-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 4px 8px;
+  border: 1px solid #cbd8e4;
+  border-radius: 999px;
+  background: #eef5fb;
+  color: #3b5b79;
+}
+
+.doc-tag-chip .text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.doc-tag-chip .remove {
+  border: 0;
+  background: transparent;
+  color: #b24c4c;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  font-size: 12px;
+}
+
+.doc-tag-chip .remove:hover {
+  color: #8f2f2f;
+}
+
+.doc-summary-dirty {
+  margin-top: 4px;
+  color: #b66a2d;
+  font-size: 0.82rem;
+}
+
 .list-row {
   display: flex;
   align-items: center;
@@ -513,12 +606,37 @@ select {
 
 .doc-title-row {
   min-height: 30px;
+  align-items: flex-start;
 }
 
 .doc-title-row .list-title {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.doc-title-text {
+  flex: 0 1 auto;
+  max-width: 460px;
+}
+
+.doc-title-tags {
+  margin-left: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.doc-lock-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  font-size: 12px;
+  opacity: 0.75;
+  margin-left: 2px;
 }
 
 .doc-card-subtle {
@@ -529,6 +647,46 @@ select {
   height: 1px;
   margin: 8px 0;
   background: linear-gradient(90deg, rgba(210, 182, 151, 0.78), rgba(210, 182, 151, 0.12));
+}
+
+.batch-toolbar-row {
+  gap: 8px;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.batch-check-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #6f6254;
+  font-size: 0.86rem;
+  white-space: nowrap;
+}
+
+.batch-check-all input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #c96e3d;
+  outline: none;
+  box-shadow: none;
+}
+
+.batch-selected-text {
+  color: #8a7b6a;
+  font-size: 0.84rem;
+  min-width: auto;
+  white-space: nowrap;
+}
+
+.batch-toolbar-row .btn {
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .doc-seq {
@@ -544,6 +702,31 @@ select {
   color: #7a6f63;
   font-size: 0.78rem;
   font-weight: 700;
+}
+
+.doc-select-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+}
+
+.doc-select-check input {
+  margin: 0;
+  width: 14px;
+  height: 14px;
+  accent-color: #c96e3d;
+  outline: none;
+  box-shadow: none;
+}
+
+.batch-check-all input[type="checkbox"]:focus,
+.batch-check-all input[type="checkbox"]:focus-visible,
+.doc-select-check input[type="checkbox"]:focus,
+.doc-select-check input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(201, 110, 61, 0.22);
 }
 
 .doc-actions {
@@ -1094,9 +1277,9 @@ select {
 }
 
 .task-icon-mark.icon-CANCELLED {
-  border-color: #cab9aa;
-  color: #7a6554;
-  background: #f3ece7;
+  border-color: #cfcfcf;
+  color: #666;
+  background: #f3f3f3;
 }
 
 .task-name {
@@ -1124,6 +1307,18 @@ select {
   font-size: 0.78rem;
   color: #7a6f63;
   white-space: nowrap;
+}
+
+.task-cancel-btn {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 0.76rem;
+  min-width: 52px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .task-expand-btn {
@@ -1174,6 +1369,19 @@ select {
   font-size: 0.75rem;
 }
 
+.task-child.batch-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.btn-xs {
+  height: 26px;
+  padding: 0 8px;
+  font-size: 0.78rem;
+}
+
 .child-success {
   background: #edf7f0;
   color: #2f6544;
@@ -1185,8 +1393,8 @@ select {
 }
 
 .child-cancelled {
-  background: #f3ece7;
-  color: #7a6554;
+  background: #f1f1f1;
+  color: #666;
 }
 
 .child-running {
@@ -1231,15 +1439,15 @@ select {
 }
 
 .status-failed {
-  background: #f9ecec;
-  border-color: #e8caca;
-  color: #8d4242;
+  background: #faecec;
+  border-color: #e4bebe;
+  color: #8b3434;
 }
 
 .status-cancelled {
-  background: #f2ece7;
-  border-color: #dfd2c5;
-  color: #7a6554;
+  background: #f2f2f2;
+  border-color: #d6d6d6;
+  color: #666;
 }
 
 .status-running {
@@ -1285,6 +1493,53 @@ select {
   gap: 12px;
 }
 
+.btn-link-inline {
+  border: none;
+  background: transparent;
+  color: #9e6231;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 0.85rem;
+  line-height: 1.2;
+}
+
+.btn-link-inline:hover {
+  color: #7d4a20;
+  text-decoration: underline;
+}
+
+.batch-prereq-list {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #eadbc9;
+  border-radius: 10px;
+  padding: 8px 10px;
+  max-height: 180px;
+  overflow: auto;
+  background: #fffcf8;
+}
+
+.batch-prereq-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.84rem;
+}
+
+.batch-prereq-item .name {
+  min-width: 0;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #4a3d30;
+}
+
+.batch-prereq-item .reason {
+  color: #8a6037;
+  font-size: 0.82rem;
+}
+
 .modal-card.chunk-detail-modal-wide {
   width: min(1140px, 96vw);
   max-height: 92vh;
@@ -1325,6 +1580,8 @@ select {
 .upload-list {
   display: grid;
   gap: 8px;
+  align-content: start;
+  grid-auto-rows: max-content;
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
@@ -1332,6 +1589,11 @@ select {
   border-radius: 10px;
   padding: 8px;
   background: #fbfdff;
+}
+
+.upload-list > .list-item {
+  height: auto;
+  align-self: start;
 }
 
 .upload-item {
