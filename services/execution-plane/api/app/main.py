@@ -175,6 +175,10 @@ class ApiDocumentTagsRequest(BaseModel):
     mode: str = Field(default="add", pattern="^(add|replace)$")
 
 
+class ApiFreezeRequest(BaseModel):
+    frozen: bool = False
+
+
 class ApiUsageBudgetUpsertRequest(BaseModel):
     scope_type: str = Field(pattern="^(TENANT|KB|MODEL|TASK_CATEGORY)$")
     scope_value: str = ""
@@ -657,6 +661,14 @@ async def delete_kb(kb_id: str, request: Request, _: dict = Depends(require_kb_w
     return {"status": "ok", "deleted": kb_id, "trace_id": request.state.trace_id}
 
 
+@app.patch("/api/v1/admin/kbs/{kb_id}/freeze")
+async def freeze_kb(kb_id: str, body: ApiFreezeRequest, request: Request, _: dict = Depends(require_kb_write)) -> Dict:
+    item = kb_store.set_kb_frozen(request.state.tenant_id, kb_id, bool(body.frozen))
+    if not item:
+        raise HTTPException(status_code=404, detail="kb not found")
+    return {"status": "ok", "item": item, "trace_id": request.state.trace_id}
+
+
 @app.post("/api/v1/admin/kbs/{kb_id}/summarize")
 async def summarize_kb(kb_id: str, request: Request, _: dict = Depends(require_kb_write)) -> Dict:
     kb_item = kb_store.get_kb(request.state.tenant_id, kb_id)
@@ -943,6 +955,21 @@ async def get_document(kb_id: str, doc_id: str, request: Request, _: dict = Depe
     return {"status": "ok", "item": data, "trace_id": request.state.trace_id}
 
 
+@app.patch("/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/freeze")
+async def freeze_document(
+    kb_id: str,
+    doc_id: str,
+    body: ApiFreezeRequest,
+    request: Request,
+    _: dict = Depends(require_kb_write),
+) -> Dict:
+    ok = kb_store.set_document_frozen(request.state.tenant_id, kb_id, doc_id, bool(body.frozen))
+    if not ok:
+        raise HTTPException(status_code=404, detail="document not found")
+    data = kb_store.get_document(request.state.tenant_id, kb_id, doc_id)
+    return {"status": "ok", "item": data, "trace_id": request.state.trace_id}
+
+
 @app.get("/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/chunks")
 async def list_chunks(kb_id: str, doc_id: str, request: Request, limit: int = 300, _: dict = Depends(require_kb_read)) -> Dict:
     drafts = kb_store.list_chunk_drafts(request.state.tenant_id, kb_id, doc_id)
@@ -952,6 +979,30 @@ async def list_chunks(kb_id: str, doc_id: str, request: Request, limit: int = 30
         if chunk.get("chunk_id") in draft_map:
             chunk["draft"] = draft_map[chunk["chunk_id"]]
     return {"status": "ok", "doc_id": doc_id, "items": chunks, "drafts": drafts, "trace_id": request.state.trace_id}
+
+
+@app.patch("/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/chunks/{chunk_id}/freeze")
+async def freeze_chunk(
+    kb_id: str,
+    doc_id: str,
+    chunk_id: str,
+    body: ApiFreezeRequest,
+    request: Request,
+    _: dict = Depends(require_kb_write),
+) -> Dict:
+    ok = kb_store.set_chunk_frozen(request.state.tenant_id, kb_id, doc_id, chunk_id, bool(body.frozen))
+    if not ok:
+        raise HTTPException(status_code=404, detail="chunk not found")
+    return {
+        "status": "ok",
+        "item": {
+            "kb_id": kb_id,
+            "doc_id": doc_id,
+            "chunk_id": chunk_id,
+            "frozen": bool(body.frozen),
+        },
+        "trace_id": request.state.trace_id,
+    }
 
 
 @app.put("/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/chunks/{chunk_id}/draft")

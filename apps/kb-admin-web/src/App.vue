@@ -153,6 +153,8 @@ const visibleDocs = computed(() => {
     if (docStatusFilter.value === 'ok' && statusText !== 'ok') return false
     if (docStatusFilter.value === 'failed' && String(doc?.status || '').toUpperCase() !== 'FAILED') return false
     if (docStatusFilter.value === 'cancelled' && String(doc?.status || '').toUpperCase() !== 'CANCELLED') return false
+    if (docStatusFilter.value === 'frozen' && !doc?.frozen) return false
+    if (docStatusFilter.value === 'active' && !!doc?.frozen) return false
     if (docTagFilter.value === 'has' && !hasTag) return false
     if (docTagFilter.value === 'none' && hasTag) return false
     if (tagKeyword) {
@@ -1044,6 +1046,7 @@ function docTaskState(doc) {
 }
 
 function docPrimaryBadge(doc) {
+  if (doc?.frozen) return { text: 'frozen', cls: 'badge-muted' }
   if (isDocChunking(doc)) return { text: 'chunking', cls: 'badge-info' }
   if (isDocEmbedding(doc)) return { text: 'embedding', cls: 'badge-info' }
   if (isDocSummarizing(doc)) return { text: 'summarizing', cls: 'badge-info' }
@@ -1692,6 +1695,69 @@ async function summarizeKb(kb) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     pushNotice('error', msg)
+  }
+}
+
+async function setKbFrozen(kb, frozen) {
+  if (!kb?.kb_id) return
+  try {
+    await callApi(`/api/v1/admin/kbs/${encodeURIComponent(kb.kb_id)}/freeze`, {
+      method: 'PATCH',
+      headers: withHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ frozen: !!frozen }),
+    })
+    kbMenuOpenId.value = ''
+    await loadKbs()
+    if (selectedKbId.value === kb.kb_id) {
+      await loadDocs()
+    }
+    pushNotice('success', `${kb.name || kb.kb_id} 已${frozen ? '冻结' : '解冻'}`)
+  } catch (err) {
+    pushNotice('error', err instanceof Error ? err.message : String(err))
+  }
+}
+
+async function setDocumentFrozen(doc, frozen) {
+  const kbId = String(doc?.kb_id || selectedKbId.value || '')
+  const docId = String(doc?.doc_id || '')
+  if (!kbId || !docId) return
+  try {
+    await callApi(`/api/v1/admin/kbs/${encodeURIComponent(kbId)}/documents/${encodeURIComponent(docId)}/freeze`, {
+      method: 'PATCH',
+      headers: withHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ frozen: !!frozen }),
+    })
+    await loadDocs()
+    if (selectedDocId.value === docId && ui.currentView === 'chunks') {
+      await loadChunks()
+    }
+    pushNotice('success', `${doc.filename || docId} 已${frozen ? '冻结' : '解冻'}`)
+  } catch (err) {
+    pushNotice('error', err instanceof Error ? err.message : String(err))
+  }
+}
+
+async function setChunkFrozen(chunk, frozen) {
+  const kbId = String(selectedKbId.value || '')
+  const docId = String(selectedDocId.value || '')
+  const chunkId = String(chunk?.chunk_id || '')
+  if (!kbId || !docId || !chunkId) return
+  try {
+    await callApi(
+      `/api/v1/admin/kbs/${encodeURIComponent(kbId)}/documents/${encodeURIComponent(docId)}/chunks/${encodeURIComponent(chunkId)}/freeze`,
+      {
+        method: 'PATCH',
+        headers: withHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ frozen: !!frozen }),
+      },
+    )
+    chunks.value = chunks.value.map((x) => (x.chunk_id === chunkId ? { ...x, frozen: !!frozen } : x))
+    if (selectedChunk.value?.chunk_id === chunkId) {
+      selectedChunk.value = { ...selectedChunk.value, frozen: !!frozen }
+    }
+    pushNotice('success', `Chunk #${Number(chunk?.chunk_index || 0) + 1} 已${frozen ? '冻结' : '解冻'}`)
+  } catch (err) {
+    pushNotice('error', err instanceof Error ? err.message : String(err))
   }
 }
 
@@ -2497,6 +2563,7 @@ async function refreshAll() {
 function chunkDraftCardClass(chunk) {
   const action = String(chunk?.draft?.action || '')
   return {
+    'chunk-card-frozen': !!chunk?.frozen,
     'chunk-card-delete': action === 'delete',
     'chunk-card-edit': action === 'edit',
     'chunk-card-hit': isChunkMatched(chunk),
@@ -2708,13 +2775,17 @@ function addUploadFiles(files) {
           v-for="kb in visibleKbs"
           :key="kb.kb_id"
           class="list-item kb-card"
-          :class="{ active: kb.kb_id === selectedKbId, 'menu-open': kbMenuOpenId === kb.kb_id }"
+          :class="{ active: kb.kb_id === selectedKbId, 'menu-open': kbMenuOpenId === kb.kb_id, 'kb-frozen': !!kb.frozen }"
           @click="selectedKbId = kb.kb_id; loadDocs(); loadTasks(); kbMenuOpenId = ''"
         >
           <div class="list-row kb-card-head">
+            <span v-if="kb.frozen" class="freeze-icon" title="已冻结">🧊</span>
             <strong class="list-title">{{ kb.name }}</strong>
             <button class="btn ghost kb-menu-btn" @click.stop="toggleKbMenu(kb.kb_id)" title="库菜单">⋯</button>
             <div v-if="kbMenuOpenId === kb.kb_id" class="kb-card-menu" @click.stop>
+              <button class="btn ghost kb-card-menu-item" @click.stop="setKbFrozen(kb, !kb.frozen)">
+                {{ kb.frozen ? '解冻库' : '冻结库' }}
+              </button>
               <button
                 class="btn ghost kb-card-menu-item"
                 :disabled="Number(kb.stats?.document_count || 0) <= 0"
@@ -2735,6 +2806,7 @@ function addUploadFiles(files) {
             <span>size: {{ formatBytes(kb.stats?.total_size_bytes) }}</span>
             <span>words: {{ kb.stats?.total_words || 0 }}</span>
           </div>
+          <div v-if="kb.frozen" class="meta kb-frozen-tip">已冻结：库内文档/切片不会参与检索和排序</div>
           <div
             class="meta summary-line truncated kb-summary"
             :class="{ 'kb-summary-dirty': kb.summary_dirty }"
@@ -2771,6 +2843,8 @@ function addUploadFiles(files) {
               <option value="ok">状态：已就绪</option>
               <option value="failed">状态：失败</option>
               <option value="cancelled">状态：已取消</option>
+              <option value="active">冻结：仅未冻结</option>
+              <option value="frozen">冻结：仅冻结</option>
             </select>
             <select class="doc-filter-sort" v-model="docTagFilter" title="标签筛选">
               <option value="all">标签：全部</option>
@@ -2815,6 +2889,7 @@ function addUploadFiles(files) {
             class="list-item doc-card"
             :class="{
               active: doc.doc_id === selectedDocId,
+              'doc-card-frozen': !!doc.frozen,
               'pending-delete': !!pendingDocDeletes[docDeleteKey(doc.doc_id, doc.kb_id || selectedKbId)]
             }"
             @mousedown="onDocCardMouseDown(doc, $event)"
@@ -2831,6 +2906,13 @@ function addUploadFiles(files) {
                   />
                 </label>
                 <span class="doc-seq">#{{ docSequenceNo(doc) }}</span>
+                <span
+                  v-if="doc.frozen"
+                  class="freeze-icon"
+                  title="文档已冻结（不参与检索与排序）"
+                >
+                  🧊
+                </span>
                 <span
                   v-if="isDocTaskLocked(doc)"
                   class="doc-lock-indicator"
@@ -2909,6 +2991,13 @@ function addUploadFiles(files) {
                 @click.stop="openDocTagModal(doc)"
               >
                 Tag
+              </button>
+              <button
+                class="btn ghost"
+                :disabled="isDocTaskLocked(doc)"
+                @click.stop="setDocumentFrozen(doc, !doc.frozen)"
+              >
+                {{ doc.frozen ? '解冻' : '冻结' }}
               </button>
               <button
                 class="btn ghost"
@@ -3049,14 +3138,18 @@ function addUploadFiles(files) {
             @click="openChunkDetail(ch)"
           >
             <div class="list-row chunk-card-head">
+              <span v-if="ch.frozen" class="freeze-icon" title="Chunk 已冻结">🧊</span>
               <strong class="chunk-corner-badge">#{{ ch.chunk_index + 1 }}</strong>
               <span class="chunk-card-state">
-                {{ ch.draft?.action === 'delete' ? '预删除' : ch.draft?.action === 'edit' ? '已编辑' : '' }}
+                {{ ch.frozen ? '冻结' : (ch.draft?.action === 'delete' ? '预删除' : ch.draft?.action === 'edit' ? '已编辑' : '') }}
               </span>
             </div>
             <pre v-html="chunkPreviewHtml(ch)"></pre>
             <div class="chunk-card-actions">
               <button class="btn ghost" :disabled="ch.draft?.action === 'delete'" @click.stop="openChunkEditor(ch)">编辑草稿</button>
+              <button class="btn ghost" @click.stop="setChunkFrozen(ch, !ch.frozen)">
+                {{ ch.frozen ? '解冻' : '冻结' }}
+              </button>
               <button
                 class="btn ghost"
                 @click.stop="ch.draft?.action === 'delete' ? clearDraft(ch.chunk_id) : setDraftDelete(ch.chunk_id)"
@@ -3478,6 +3571,7 @@ function addUploadFiles(files) {
     <div v-if="ui.showChunkDetailModal && selectedChunk" class="modal" @mousedown.self="closeChunkDetailModal">
       <div class="modal-card" :class="{ 'chunk-detail-modal-wide': ui.chunkEditMode && ui.chunkDiffMode }" @keydown.enter.prevent>
         <div class="panel-header">
+          <span v-if="selectedChunk?.frozen" class="freeze-icon" title="Chunk 已冻结">🧊</span>
           <strong>Chunk #{{ Number(selectedChunk.chunk_index || 0) + 1 }} 详情</strong>
         </div>
         <template v-if="ui.chunkEditMode">
@@ -3519,6 +3613,13 @@ function addUploadFiles(files) {
             @click="enterChunkEditMode"
           >
             编辑草稿
+          </button>
+          <button
+            v-if="!ui.chunkEditMode"
+            class="btn ghost"
+            @click="setChunkFrozen(selectedChunk, !selectedChunk?.frozen)"
+          >
+            {{ selectedChunk?.frozen ? '解冻' : '冻结' }}
           </button>
           <button
             v-if="!ui.chunkEditMode"

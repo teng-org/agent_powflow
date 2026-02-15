@@ -367,6 +367,11 @@ select {
   z-index: 30;
 }
 
+.kb-card.kb-frozen {
+  background: linear-gradient(180deg, rgba(245, 247, 249, 0.98) 0%, rgba(238, 241, 245, 0.98) 100%);
+  border-color: #cfd8e2;
+}
+
 .kb-card-head .list-title {
   white-space: nowrap;
   overflow: hidden;
@@ -441,6 +446,12 @@ select {
   color: #9a8165;
 }
 
+.kb-frozen-tip {
+  margin-top: 4px;
+  color: #63758a;
+  font-size: 0.82rem;
+}
+
 .kb-card-all {
   background: linear-gradient(180deg, rgba(248, 241, 233, 0.98) 0%, rgba(244, 234, 223, 0.98) 100%);
 }
@@ -498,6 +509,11 @@ select {
 
 .doc-card.pending-delete {
   box-shadow: none;
+}
+
+.doc-card.doc-card-frozen {
+  background: linear-gradient(180deg, #f7f9fb 0%, #f2f5f9 100%);
+  border-color: #cfd8e2;
 }
 
 .meta {
@@ -637,6 +653,17 @@ select {
   font-size: 12px;
   opacity: 0.75;
   margin-left: 2px;
+}
+
+.freeze-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  font-size: 12px;
+  opacity: 0.85;
+  flex: 0 0 auto;
 }
 
 .doc-card-subtle {
@@ -818,6 +845,11 @@ select {
   border-color: #e2c19a;
 }
 
+.chunk-card.chunk-card-frozen {
+  background: linear-gradient(180deg, #f6f8fb 0%, #eef2f7 100%);
+  border-color: #cfd9e6;
+}
+
 .chunk-card.chunk-card-hit {
   border-color: #a6bfd6;
 }
@@ -873,6 +905,10 @@ select {
 
 .chunk-card.chunk-card-edit .chunk-card-state {
   color: #8a5e1f;
+}
+
+.chunk-card.chunk-card-frozen .chunk-card-state {
+  color: #5f7389;
 }
 
 .chunk-card-actions {
