@@ -154,6 +154,12 @@ const pgTotalPages = computed(() => Math.max(1, Math.ceil((dbviz.pgTotal || 0) /
 const mongoTotalPages = computed(() => Math.max(1, Math.ceil((dbviz.mongoTotal || 0) / (dbviz.mongoPageSize || 1))))
 const usageTotalPages = computed(() => Math.max(1, Math.ceil((dbviz.usageTotal || 0) / (dbviz.usagePageSize || 1))))
 
+function formatCny(value, digits = 4) {
+  const n = Number(value || 0)
+  if (!Number.isFinite(n)) return `¥0.${'0'.repeat(digits)}`
+  return `¥${n.toFixed(digits)}`
+}
+
 const methodClass = (method) => `method-${method.toLowerCase()}`
 
 function pathWithParams(endpoint, pathParams) {
@@ -1266,8 +1272,8 @@ onBeforeUnmount(() => clearStatusTimer())
             <span>{{ dbviz.usageSummary.totals.total_tokens || 0 }}</span>
           </div>
           <div class="dbviz-card">
-            <strong>Estimated Cost (USD)</strong>
-            <span>{{ Number(dbviz.usageSummary.totals.estimated_cost_usd || 0).toFixed(4) }}</span>
+            <strong>Estimated Cost (CNY)</strong>
+            <span>{{ formatCny(dbviz.usageSummary.totals.estimated_cost_usd || 0) }}</span>
           </div>
         </div>
 
@@ -1345,14 +1351,14 @@ onBeforeUnmount(() => clearStatusTimer())
             <div class="table-wrap">
               <table class="db-table">
                 <thead>
-                  <tr><th>kb_id</th><th>calls</th><th>total_tokens</th><th>cost_usd</th></tr>
+                  <tr><th>kb_id</th><th>calls</th><th>total_tokens</th><th>cost_cny</th></tr>
                 </thead>
                 <tbody>
                   <tr v-for="item in (dbviz.usageSummary?.by_kb || [])" :key="item.kb_id">
                     <td class="mono"><span class="cell-ellipsis" :title="item.kb_id || '-'">{{ item.kb_id || '-' }}</span></td>
                     <td class="mono">{{ item.calls }}</td>
                     <td class="mono">{{ item.total_tokens }}</td>
-                    <td class="mono">{{ Number(item.estimated_cost_usd || 0).toFixed(4) }}</td>
+                    <td class="mono">{{ formatCny(item.estimated_cost_usd || 0) }}</td>
                   </tr>
                 </tbody>
               </table>
@@ -1363,7 +1369,7 @@ onBeforeUnmount(() => clearStatusTimer())
             <div class="table-wrap">
               <table class="db-table">
                 <thead>
-                  <tr><th>day</th><th>model</th><th>calls</th><th>tokens</th><th>cost_usd</th></tr>
+                  <tr><th>day</th><th>model</th><th>calls</th><th>tokens</th><th>cost_cny</th></tr>
                 </thead>
                 <tbody>
                   <tr v-for="item in (dbviz.usageSummary?.by_day_model || [])" :key="`${item.day}-${item.model}`">
@@ -1371,7 +1377,7 @@ onBeforeUnmount(() => clearStatusTimer())
                     <td class="mono"><span class="cell-ellipsis" :title="item.model">{{ item.model }}</span></td>
                     <td class="mono">{{ item.calls }}</td>
                     <td class="mono">{{ item.total_tokens }}</td>
-                    <td class="mono">{{ Number(item.estimated_cost_usd || 0).toFixed(4) }}</td>
+                    <td class="mono">{{ formatCny(item.estimated_cost_usd || 0) }}</td>
                   </tr>
                 </tbody>
               </table>
@@ -1382,7 +1388,7 @@ onBeforeUnmount(() => clearStatusTimer())
             <div class="table-wrap">
               <table class="db-table">
                 <thead>
-                  <tr><th>day</th><th>task_category</th><th>calls</th><th>tokens</th><th>cost_usd</th></tr>
+                  <tr><th>day</th><th>task_category</th><th>calls</th><th>tokens</th><th>cost_cny</th></tr>
                 </thead>
                 <tbody>
                   <tr v-for="item in (dbviz.usageSummary?.by_day_task_category || [])" :key="`${item.day}-${item.task_category}`">
@@ -1390,7 +1396,7 @@ onBeforeUnmount(() => clearStatusTimer())
                     <td class="mono"><span class="cell-ellipsis" :title="item.task_category">{{ item.task_category }}</span></td>
                     <td class="mono">{{ item.calls }}</td>
                     <td class="mono">{{ item.total_tokens }}</td>
-                    <td class="mono">{{ Number(item.estimated_cost_usd || 0).toFixed(4) }}</td>
+                    <td class="mono">{{ formatCny(item.estimated_cost_usd || 0) }}</td>
                   </tr>
                 </tbody>
               </table>
@@ -1426,7 +1432,7 @@ onBeforeUnmount(() => clearStatusTimer())
                 <input type="number" min="0" v-model="dbviz.usageBudgetForm.daily_token_limit" placeholder="empty = no limit" />
               </label>
               <label>
-                Daily Cost Limit (USD)
+                Daily Cost Limit (CNY)
                 <input type="number" min="0" step="0.0001" v-model="dbviz.usageBudgetForm.daily_cost_limit" placeholder="empty = no limit" />
               </label>
             </div>
@@ -1443,7 +1449,7 @@ onBeforeUnmount(() => clearStatusTimer())
                     <td class="mono">{{ item.budget_id }}</td>
                     <td class="mono"><span class="cell-ellipsis" :title="`${item.scope_type}:${item.scope_value}`">{{ item.scope_type }}:{{ item.scope_value }}</span></td>
                     <td class="mono">{{ item.daily_token_limit ?? '-' }}</td>
-                    <td class="mono">{{ item.daily_cost_limit ?? '-' }}</td>
+                    <td class="mono">{{ item.daily_cost_limit == null ? '-' : formatCny(item.daily_cost_limit) }}</td>
                     <td class="mono">{{ item.enabled ? 'yes' : 'no' }}</td>
                     <td><button class="ghost" @click="deleteUsageBudget(item.budget_id)">删除</button></td>
                   </tr>
@@ -1504,7 +1510,7 @@ onBeforeUnmount(() => clearStatusTimer())
                   <th>input</th>
                   <th>output</th>
                   <th>total</th>
-                  <th>cost_usd</th>
+                  <th>cost_cny</th>
                   <th>success</th>
                 </tr>
               </thead>
@@ -1518,7 +1524,7 @@ onBeforeUnmount(() => clearStatusTimer())
                   <td class="mono">{{ item.input_tokens }}</td>
                   <td class="mono">{{ item.output_tokens }}</td>
                   <td class="mono">{{ item.total_tokens }}</td>
-                  <td class="mono">{{ Number(item.estimated_cost_usd || 0).toFixed(4) }}</td>
+                  <td class="mono">{{ formatCny(item.estimated_cost_usd || 0) }}</td>
                   <td class="mono">{{ item.success ? 'ok' : 'fail' }}</td>
                 </tr>
               </tbody>
