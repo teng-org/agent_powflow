@@ -69,6 +69,7 @@ class KnowledgeBaseStore:
                 """CREATE TABLE IF NOT EXISTS knowledge_bases (
                 tenant_id TEXT NOT NULL, kb_id TEXT NOT NULL, name TEXT NOT NULL,
                 summary TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'ACTIVE',
+                frozen BOOLEAN NOT NULL DEFAULT FALSE,
                 summary_embedding_json JSONB NOT NULL DEFAULT '[]'::jsonb,
                 summary_dirty BOOLEAN NOT NULL DEFAULT TRUE,
                 summary_updated_at TIMESTAMPTZ NULL,
@@ -77,6 +78,7 @@ class KnowledgeBaseStore:
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (tenant_id, kb_id))"""
             )
+            cur.execute("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS frozen BOOLEAN NOT NULL DEFAULT FALSE")
             cur.execute("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS summary_embedding_json JSONB NOT NULL DEFAULT '[]'::jsonb")
             cur.execute("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS summary_dirty BOOLEAN NOT NULL DEFAULT TRUE")
             cur.execute("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS summary_updated_at TIMESTAMPTZ NULL")
@@ -90,6 +92,7 @@ class KnowledgeBaseStore:
                 summary_text TEXT NOT NULL DEFAULT '',
                 summary_embedding_json JSONB NOT NULL DEFAULT '[]'::jsonb,
                 summary_dirty BOOLEAN NOT NULL DEFAULT TRUE,
+                frozen BOOLEAN NOT NULL DEFAULT FALSE,
                 text_size_bytes INTEGER NOT NULL DEFAULT 0, word_count INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'UPLOADED', chunk_count INTEGER NOT NULL DEFAULT 0,
                 embedded_count INTEGER NOT NULL DEFAULT 0, embedding_dirty BOOLEAN NOT NULL DEFAULT TRUE,
@@ -100,6 +103,7 @@ class KnowledgeBaseStore:
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (tenant_id, kb_id, doc_id))"""
             )
+            cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS frozen BOOLEAN NOT NULL DEFAULT FALSE")
             cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS tags_json JSONB NOT NULL DEFAULT '[]'::jsonb")
             cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS summary_overview TEXT NOT NULL DEFAULT ''")
             cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS summary_text TEXT NOT NULL DEFAULT ''")
@@ -113,10 +117,12 @@ class KnowledgeBaseStore:
                 """CREATE TABLE IF NOT EXISTS chunks (
                 tenant_id TEXT NOT NULL, kb_id TEXT NOT NULL, doc_id TEXT NOT NULL,
                 chunk_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, text TEXT NOT NULL,
+                frozen BOOLEAN NOT NULL DEFAULT FALSE,
                 embedding_json JSONB NOT NULL, metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (tenant_id, kb_id, doc_id, chunk_id))"""
             )
+            cur.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS frozen BOOLEAN NOT NULL DEFAULT FALSE")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks (tenant_id, kb_id, doc_id, chunk_index)")
             cur.execute(
                 """CREATE TABLE IF NOT EXISTS tasks (
@@ -864,7 +870,7 @@ class KnowledgeBaseStore:
         self._ensure_indexes()
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT tenant_id,kb_id,name,summary,summary_embedding_json,summary_dirty,summary_updated_at,status,stats,created_at,updated_at FROM knowledge_bases WHERE tenant_id=%s AND kb_id=%s",
+                "SELECT tenant_id,kb_id,name,summary,frozen,summary_embedding_json,summary_dirty,summary_updated_at,status,stats,created_at,updated_at FROM knowledge_bases WHERE tenant_id=%s AND kb_id=%s",
                 (tenant_id, kb_id),
             )
             row = cur.fetchone()
@@ -874,7 +880,7 @@ class KnowledgeBaseStore:
         self._ensure_indexes()
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT tenant_id,kb_id,name,summary,summary_embedding_json,summary_dirty,summary_updated_at,status,stats,created_at,updated_at FROM knowledge_bases WHERE tenant_id=%s ORDER BY created_at ASC",
+                "SELECT tenant_id,kb_id,name,summary,frozen,summary_embedding_json,summary_dirty,summary_updated_at,status,stats,created_at,updated_at FROM knowledge_bases WHERE tenant_id=%s ORDER BY created_at ASC",
                 (tenant_id,),
             )
             return [dict(row) for row in cur.fetchall()]
@@ -953,6 +959,17 @@ class KnowledgeBaseStore:
             self.qdrant.delete_collection(collection_name=collection_name)
         return deleted
 
+    def set_kb_frozen(self, tenant_id: str, kb_id: str, frozen: bool) -> dict | None:
+        self._ensure_indexes()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE knowledge_bases SET frozen=%s, updated_at=NOW() WHERE tenant_id=%s AND kb_id=%s",
+                (bool(frozen), tenant_id, kb_id),
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get_kb(tenant_id, kb_id)
+
     def save_document(
         self,
         tenant_id: str,
@@ -980,8 +997,8 @@ class KnowledgeBaseStore:
             cur.execute(
                 """INSERT INTO documents (
                     tenant_id,kb_id,doc_id,filename,raw_text,raw_text_preview,tags_json,summary_overview,summary_text,summary_embedding_json,summary_dirty,text_size_bytes,word_count,
-                    status,chunk_count,embedded_count,embedding_dirty,chunk_method,chunk_size,chunk_overlap,chunk_delimiter,created_at,updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,'[]'::jsonb,'','','[]'::jsonb,TRUE,%s,%s,'UPLOADED',0,0,TRUE,%s,%s,%s,%s,NOW(),NOW())
+                    status,chunk_count,embedded_count,embedding_dirty,frozen,chunk_method,chunk_size,chunk_overlap,chunk_delimiter,created_at,updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,'[]'::jsonb,'','','[]'::jsonb,TRUE,%s,%s,'UPLOADED',0,0,TRUE,FALSE,%s,%s,%s,%s,NOW(),NOW())
                 ON CONFLICT (tenant_id,kb_id,doc_id) DO UPDATE SET
                     filename=EXCLUDED.filename, raw_text=EXCLUDED.raw_text, raw_text_preview=EXCLUDED.raw_text_preview,
                     summary_overview='', summary_text='', summary_embedding_json='[]'::jsonb, summary_dirty=TRUE,
@@ -1094,7 +1111,7 @@ class KnowledgeBaseStore:
             return False
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                """SELECT chunk_id,chunk_index,text,embedding_json,metadata
+                """SELECT chunk_id,chunk_index,text,frozen,embedding_json,metadata
                 FROM chunks
                 WHERE tenant_id=%s AND kb_id=%s AND doc_id=%s
                 ORDER BY chunk_index ASC""",
@@ -1107,9 +1124,9 @@ class KnowledgeBaseStore:
                 """INSERT INTO documents (
                     tenant_id,kb_id,doc_id,filename,raw_text,raw_text_preview,tags_json,
                     summary_overview,summary_text,summary_embedding_json,summary_dirty,text_size_bytes,word_count,
-                    status,chunk_count,embedded_count,embedding_dirty,
+                    status,chunk_count,embedded_count,embedding_dirty,frozen,
                     chunk_method,chunk_size,chunk_overlap,chunk_delimiter,created_at,updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW())
+                VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW())
                 ON CONFLICT (tenant_id,kb_id,doc_id) DO UPDATE SET
                     filename=EXCLUDED.filename,
                     raw_text=EXCLUDED.raw_text,
@@ -1125,6 +1142,7 @@ class KnowledgeBaseStore:
                     chunk_count=EXCLUDED.chunk_count,
                     embedded_count=EXCLUDED.embedded_count,
                     embedding_dirty=EXCLUDED.embedding_dirty,
+                    frozen=EXCLUDED.frozen,
                     chunk_method=EXCLUDED.chunk_method,
                     chunk_size=EXCLUDED.chunk_size,
                     chunk_overlap=EXCLUDED.chunk_overlap,
@@ -1148,6 +1166,7 @@ class KnowledgeBaseStore:
                     int(doc.get("chunk_count") or 0),
                     int(doc.get("embedded_count") or 0),
                     bool(doc.get("embedding_dirty", True)),
+                    bool(doc.get("frozen", False)),
                     self._strip_nul(doc.get("chunk_method", "sentence")),
                     int(doc.get("chunk_size") or 500),
                     int(doc.get("chunk_overlap") or 50),
@@ -1157,8 +1176,8 @@ class KnowledgeBaseStore:
             cur.execute("DELETE FROM chunks WHERE tenant_id=%s AND kb_id=%s AND doc_id=%s", (tenant_id, to_kb_id, doc_id))
             for ch in chunks:
                 cur.execute(
-                    """INSERT INTO chunks (tenant_id,kb_id,doc_id,chunk_id,chunk_index,text,embedding_json,metadata,created_at,updated_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,NOW(),NOW())""",
+                    """INSERT INTO chunks (tenant_id,kb_id,doc_id,chunk_id,chunk_index,text,frozen,embedding_json,metadata,created_at,updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,NOW(),NOW())""",
                     (
                         tenant_id,
                         to_kb_id,
@@ -1166,6 +1185,7 @@ class KnowledgeBaseStore:
                         ch["chunk_id"],
                         int(ch.get("chunk_index") or 0),
                         self._strip_nul(ch.get("text", "")),
+                        bool(ch.get("frozen", False)),
                         json.dumps(ch.get("embedding_json") or [], ensure_ascii=False),
                         json.dumps(ch.get("metadata") or {}, ensure_ascii=False),
                     ),
@@ -1231,7 +1251,7 @@ class KnowledgeBaseStore:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """SELECT tenant_id,kb_id,doc_id,filename,raw_text,raw_text_preview,summary_overview,summary_text,summary_embedding_json,summary_dirty,text_size_bytes,word_count,
-                tags_json,
+                tags_json,frozen,
                 status,chunk_count,embedded_count,embedding_dirty,
                 chunk_method,chunk_size,chunk_overlap,chunk_delimiter,
                 created_at,updated_at
@@ -1248,6 +1268,26 @@ class KnowledgeBaseStore:
                 "UPDATE documents SET status=%s, updated_at=NOW() WHERE tenant_id=%s AND kb_id=%s AND doc_id=%s",
                 (status, tenant_id, kb_id, doc_id),
             )
+
+    def set_document_frozen(self, tenant_id: str, kb_id: str, doc_id: str, frozen: bool) -> bool:
+        self._ensure_indexes()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE documents SET frozen=%s, updated_at=NOW() WHERE tenant_id=%s AND kb_id=%s AND doc_id=%s",
+                (bool(frozen), tenant_id, kb_id, doc_id),
+            )
+            return bool(cur.rowcount and int(cur.rowcount) > 0)
+
+    def set_chunk_frozen(self, tenant_id: str, kb_id: str, doc_id: str, chunk_id: str, frozen: bool) -> bool:
+        self._ensure_indexes()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """UPDATE chunks
+                SET frozen=%s, updated_at=NOW()
+                WHERE tenant_id=%s AND kb_id=%s AND doc_id=%s AND chunk_id=%s""",
+                (bool(frozen), tenant_id, kb_id, doc_id, chunk_id),
+            )
+            return bool(cur.rowcount and int(cur.rowcount) > 0)
 
     def set_document_summary(
         self,
@@ -1385,8 +1425,8 @@ class KnowledgeBaseStore:
                 raw = f"{tenant_id}:{kb_id}:{doc_id}:{idx}:{safe_text}"
                 chunk_id = hashlib.sha1(raw.encode("utf-8")).hexdigest()  # nosec B324
                 cur.execute(
-                    """INSERT INTO chunks (tenant_id,kb_id,doc_id,chunk_id,chunk_index,text,embedding_json,metadata,created_at,updated_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,NOW(),NOW())""",
+                    """INSERT INTO chunks (tenant_id,kb_id,doc_id,chunk_id,chunk_index,text,frozen,embedding_json,metadata,created_at,updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,FALSE,%s::jsonb,%s::jsonb,NOW(),NOW())""",
                     (
                         tenant_id,
                         kb_id,
@@ -1467,8 +1507,8 @@ class KnowledgeBaseStore:
                 safe_text = self._strip_nul(c.text)
                 safe_filename = self._strip_nul((c.metadata or {}).get("filename", "unknown"))
                 cur.execute(
-                    """INSERT INTO chunks (tenant_id,kb_id,doc_id,chunk_id,chunk_index,text,embedding_json,metadata,created_at,updated_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,NOW(),NOW())""",
+                    """INSERT INTO chunks (tenant_id,kb_id,doc_id,chunk_id,chunk_index,text,frozen,embedding_json,metadata,created_at,updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,FALSE,%s::jsonb,%s::jsonb,NOW(),NOW())""",
                     (
                         c.tenant_id,
                         c.kb_id,
@@ -1518,6 +1558,16 @@ class KnowledgeBaseStore:
 
     def search_chunks(self, tenant_id: str, kb_id: str, query_vector: list[float], top_k: int, doc_ids: list[str] | None = None) -> list[dict]:
         self._ensure_indexes()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT frozen FROM knowledge_bases WHERE tenant_id=%s AND kb_id=%s",
+                (tenant_id, kb_id),
+            )
+            kb = cur.fetchone()
+            if not kb:
+                return []
+            if bool(kb.get("frozen")):
+                return []
         collection_name = self._collection_name(tenant_id, kb_id)
         conditions = [
             qmodels.FieldCondition(key="tenant_id", match=qmodels.MatchValue(value=tenant_id)),
@@ -1532,7 +1582,7 @@ class KnowledgeBaseStore:
             limit=max(1, min(int(top_k), 50)),
             with_payload=True,
         )
-        return [
+        items = [
             {
                 "doc_id": (hit.payload or {}).get("doc_id", ""),
                 "chunk_id": (hit.payload or {}).get("chunk_id", ""),
@@ -1543,6 +1593,52 @@ class KnowledgeBaseStore:
             }
             for hit in results
         ]
+        if not items:
+            return []
+
+        hit_doc_ids = list({str(item.get("doc_id") or "") for item in items if str(item.get("doc_id") or "")})
+        if not hit_doc_ids:
+            return []
+
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT doc_id,frozen
+                FROM documents
+                WHERE tenant_id=%s AND kb_id=%s AND doc_id = ANY(%s)""",
+                (tenant_id, kb_id, hit_doc_ids),
+            )
+            doc_rows = [dict(r) for r in cur.fetchall()]
+            doc_frozen_map = {str(r.get("doc_id") or ""): bool(r.get("frozen")) for r in doc_rows}
+
+            cur.execute(
+                """SELECT doc_id,chunk_id,frozen
+                FROM chunks
+                WHERE tenant_id=%s AND kb_id=%s AND doc_id = ANY(%s)""",
+                (tenant_id, kb_id, hit_doc_ids),
+            )
+            chunk_rows = [dict(r) for r in cur.fetchall()]
+            chunk_frozen_map = {
+                (str(r.get("doc_id") or ""), str(r.get("chunk_id") or "")): bool(r.get("frozen"))
+                for r in chunk_rows
+            }
+
+        filtered: list[dict] = []
+        for item in items:
+            doc_id = str(item.get("doc_id") or "")
+            chunk_id = str(item.get("chunk_id") or "")
+            if not doc_id or not chunk_id:
+                continue
+            # Drop stale vector hits that no longer exist in SQL.
+            if doc_id not in doc_frozen_map:
+                continue
+            if (doc_id, chunk_id) not in chunk_frozen_map:
+                continue
+            if doc_frozen_map.get(doc_id, False):
+                continue
+            if chunk_frozen_map.get((doc_id, chunk_id), False):
+                continue
+            filtered.append(item)
+        return filtered
 
     def list_documents(self, tenant_id: str, kb_id: str, limit: int = 100) -> list[dict]:
         self._ensure_indexes()
@@ -1550,7 +1646,7 @@ class KnowledgeBaseStore:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """SELECT tenant_id,kb_id,doc_id,filename,status,chunk_count,embedded_count,embedding_dirty,
-                tags_json,
+                tags_json,frozen,
                 summary_overview,summary_text,summary_dirty,
                 chunk_method,chunk_size,chunk_overlap,chunk_delimiter,
                 created_at,updated_at,text_size_bytes,word_count
@@ -1583,6 +1679,7 @@ class KnowledgeBaseStore:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """SELECT tenant_id,kb_id,doc_id,chunk_id,chunk_index,text,embedding_json,metadata,updated_at,created_at
+                ,frozen
                 FROM chunks WHERE tenant_id=%s AND kb_id=%s AND doc_id=%s ORDER BY chunk_index ASC LIMIT %s""",
                 (tenant_id, kb_id, doc_id, cap),
             )
