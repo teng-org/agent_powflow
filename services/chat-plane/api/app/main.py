@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uuid
 from typing import Any, Dict, Optional
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -23,6 +25,7 @@ from runtime.models import ChatContext, ChatRequest
 from runtime.store import chat_store
 
 app = FastAPI(title="agent-powflow-chat-plane", version="0.1.0")
+_memory_rerank_worker_task: asyncio.Task | None = None
 
 cors_origins = str(
     get_setting(
@@ -40,7 +43,7 @@ app.add_middleware(
 
 
 class CreateSessionRequest(BaseModel):
-    title: str = Field(default="New Chat", max_length=120)
+    title: str = Field(default="新对话", max_length=120)
     kb_id: Optional[str] = None
 
 
@@ -66,6 +69,26 @@ class MemoryConfigPatchRequest(BaseModel):
     memory_long_summary_max_chars: Optional[int] = None
     memory_profile_max_chars: Optional[int] = None
     memory_item_max: Optional[int] = None
+    memory_profile_refresh_new_messages_threshold: Optional[int] = None
+    memory_profile_sample_messages: Optional[int] = None
+    memory_profile_sample_max_chars: Optional[int] = None
+    memory_recent_topics_limit: Optional[int] = None
+    memory_recent_events_limit: Optional[int] = None
+    memory_budget_total_tokens: Optional[int] = None
+    memory_budget_l0_ratio: Optional[float] = None
+    memory_budget_l1_ratio: Optional[float] = None
+    memory_budget_l2_ratio: Optional[float] = None
+    memory_budget_l3_ratio: Optional[float] = None
+    memory_budget_l4_ratio: Optional[float] = None
+    memory_budget_l5_ratio: Optional[float] = None
+    memory_keyword_top_k: Optional[int] = None
+    memory_rerank_enabled: Optional[bool] = None
+    memory_rerank_batch_size: Optional[int] = None
+
+
+class MemoryRerankRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    limit: int = Field(default=200, ge=1, le=2000)
 
 
 class ChatApiPoolUpsertRequest(BaseModel):
@@ -182,7 +205,7 @@ async def require_admin(
     secret = str(get_setting("chat_jwt_secret", get_setting("execution_jwt_secret", "change-me-in-production")))
     allow_legacy_admin_token = str(get_setting("chat_allow_legacy_admin_token", "false")).lower() in {"1", "true", "yes", "on"}
     if allow_legacy_admin_token:
-        expected = str(get_setting("execution_admin_token", "dev-admin-token"))
+        expected = str(get_setting("execution_admin_token", ""))
         if token == expected:
             return {"tenant_id": "platform", "actor_id": "admin", "roles": ["PLATFORM_ADMIN"]}
     try:
@@ -338,6 +361,71 @@ async def get_auth_context(request: Request, auth: Dict = Depends(require_auth))
     }
 
 
+@app.get("/api/v1/chat/config")
+async def get_chat_config_user(request: Request, auth: Dict = Depends(require_auth)) -> Dict:
+    _assert_request_scope(request, auth)
+    base = {
+        # 用户态只读配置：可见当前生效的默认 prompt 与检索参数
+        "chat_system_prompt": str(
+            get_setting(
+                "chat_system_prompt",
+                "你是企业知识库问答助手。优先依据给定证据回答；若证据不足，明确说明并给出下一步建议。",
+            )
+        ),
+        "chat_default_top_k": int(get_setting("chat_default_top_k", 6)),
+        "chat_default_rank_method": str(get_setting("chat_default_rank_method", "vector")),
+    }
+    return {"status": "ok", "item": base}
+
+
+@app.get("/api/v1/chat/kbs")
+async def list_accessible_kbs_for_chat_user(request: Request, auth: Dict = Depends(require_auth)) -> Dict:
+    _assert_request_scope(request, auth)
+    base = str(get_setting("execution_api_base_url", "http://execution-api:8090")).rstrip("/")
+    admin_username = str(get_setting("execution_admin_username", "admin"))
+    admin_password = str(get_setting("execution_admin_password", "admin123"))
+    trace_id = request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+    timeout = httpx.Timeout(20.0)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            login_resp = await client.post(
+                f"{base}/api/v1/admin/auth/login",
+                json={"username": admin_username, "password": admin_password},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Source-Service": "chat-plane",
+                    "X-Trace-Id": trace_id,
+                },
+            )
+            login_resp.raise_for_status()
+            login_data = login_resp.json()
+            access_token = str(login_data.get("access_token") or "").strip()
+            if not access_token:
+                raise HTTPException(status_code=502, detail="execution admin login returned empty token")
+
+            list_resp = await client.get(
+                f"{base}/api/v1/admin/kbs",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "X-Tenant-Id": str(auth["tenant_id"]),
+                    "X-Actor-Id": str(auth["actor_id"]),
+                    "X-Source-Service": "chat-plane",
+                    "X-Trace-Id": trace_id,
+                },
+            )
+            list_resp.raise_for_status()
+            data = list_resp.json()
+            items = data.get("items") if isinstance(data, dict) else []
+            if not isinstance(items, list):
+                items = []
+            return {"status": "ok", "items": items, "trace_id": trace_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"failed to load kb list from execution-api: {exc}") from exc
+
+
 @app.get("/api/v1/admin/chat/config")
 async def get_chat_config(_: Dict = Depends(require_admin)) -> Dict:
     base = {
@@ -372,6 +460,35 @@ async def patch_memory_config_endpoint(body: MemoryConfigPatchRequest, _: Dict =
     updates = normalize_memory_config_updates(body.model_dump(exclude_none=True))
     set_overrides(updates)
     return {"status": "ok", "item": get_memory_config().as_dict(), "updates": updates}
+
+
+@app.post("/api/v1/admin/chat/memory/rerank")
+async def rerank_memory_endpoint(body: MemoryRerankRequest, _: Dict = Depends(require_admin)) -> Dict:
+    session = chat_store.get_session(body.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="session not found")
+    job = chat_store.enqueue_memory_rerank_job(
+        session_id=body.session_id,
+        tenant_id=session.tenant_id,
+        actor_id=session.actor_id,
+        requested_by="admin",
+        request_limit=body.limit,
+    )
+    return {"status": "ok", "item": job}
+
+
+@app.get("/api/v1/admin/chat/memory/rerank/jobs")
+async def list_memory_rerank_jobs(limit: int = 50, _: Dict = Depends(require_admin)) -> Dict:
+    items = chat_store.list_memory_rerank_jobs(limit=limit)
+    return {"status": "ok", "items": items}
+
+
+@app.get("/api/v1/admin/chat/memory/rerank/jobs/{job_id}")
+async def get_memory_rerank_job(job_id: str, _: Dict = Depends(require_admin)) -> Dict:
+    item = chat_store.get_memory_rerank_job(job_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"status": "ok", "item": item}
 
 
 @app.get("/api/v1/admin/chat/api-pool")
@@ -426,6 +543,65 @@ async def reload_default_chat_api_pool(_: Dict = Depends(require_admin)) -> Dict
     }
 
 
+@app.get("/api/v1/admin/chat/store/status")
+async def get_chat_store_status(_: Dict = Depends(require_admin)) -> Dict:
+    return {"status": "ok", "item": chat_store.get_store_status()}
+
+
+@app.post("/api/v1/admin/chat/store/flush")
+async def flush_chat_store(_: Dict = Depends(require_admin)) -> Dict:
+    result = chat_store.force_flush()
+    return result
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(_: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"status": "error", "detail": str(exc)})
+
+
+async def _memory_rerank_worker_loop() -> None:
+    while True:
+        try:
+            job = chat_store.claim_next_memory_rerank_job(worker_id="chat-plane-api")
+            if not job:
+                await asyncio.sleep(0.8)
+                continue
+            job_id = str(job.get("job_id") or "")
+            session_id = str(job.get("session_id") or "")
+            limit = int(job.get("request_limit") or 200)
+            try:
+                result = await chat_pipeline.rerank_memory_items(session_id=session_id, limit=limit)
+                chat_store.complete_memory_rerank_job(
+                    job_id,
+                    status="SUCCEEDED",
+                    result=result if isinstance(result, dict) else {"status": "ok"},
+                )
+            except Exception as exc:
+                chat_store.complete_memory_rerank_job(
+                    job_id,
+                    status="FAILED",
+                    error_message=str(exc),
+                )
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(1.0)
+
+
+@app.on_event("startup")
+async def _startup_background_workers() -> None:
+    global _memory_rerank_worker_task
+    if _memory_rerank_worker_task is None or _memory_rerank_worker_task.done():
+        _memory_rerank_worker_task = asyncio.create_task(_memory_rerank_worker_loop())
+
+
+@app.on_event("shutdown")
+async def _shutdown_background_workers() -> None:
+    global _memory_rerank_worker_task
+    if _memory_rerank_worker_task is not None:
+        _memory_rerank_worker_task.cancel()
+        try:
+            await _memory_rerank_worker_task
+        except Exception:
+            pass
+        _memory_rerank_worker_task = None

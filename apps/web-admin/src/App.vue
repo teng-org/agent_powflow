@@ -5,7 +5,7 @@ const cfg = reactive({
   controlPlaneBaseUrl: 'http://127.0.0.1:8099',
   tenantCode: 'platform',
   username: 'admin',
-  password: 'admin123',
+  password: '',
   token: '',
 })
 

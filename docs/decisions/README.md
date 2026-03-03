@@ -11,3 +11,5 @@
 - `docs/decisions/ADR-005-agent-core-chat-memory-tools-first.zh-CN.md`
 - `docs/decisions/ADR-006-springboot-controlplane-chatplane-strong-auth-integration.zh-CN.md`
 - `docs/decisions/ADR-007-chat-plane-tenant-enforcement.zh-CN.md`
+- `docs/decisions/ADR-008-chat-plane-conversation-storage-and-persistence-optimization.zh-CN.md`
+- `docs/decisions/ADR-009-chat-memory-fusion-strategy.zh-CN.md`

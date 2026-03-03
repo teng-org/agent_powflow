@@ -19,6 +19,21 @@ class MemoryConfig:
     long_summary_max_chars: int
     profile_max_chars: int
     memory_item_max: int
+    profile_refresh_new_messages_threshold: int
+    profile_sample_messages: int
+    profile_sample_max_chars: int
+    recent_topics_limit: int
+    recent_events_limit: int
+    budget_total_tokens: int
+    budget_l0_ratio: float
+    budget_l1_ratio: float
+    budget_l2_ratio: float
+    budget_l3_ratio: float
+    budget_l4_ratio: float
+    budget_l5_ratio: float
+    keyword_top_k: int
+    rerank_enabled: bool
+    rerank_batch_size: int
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -33,6 +48,21 @@ class MemoryConfig:
             "memory_long_summary_max_chars": self.long_summary_max_chars,
             "memory_profile_max_chars": self.profile_max_chars,
             "memory_item_max": self.memory_item_max,
+            "memory_profile_refresh_new_messages_threshold": self.profile_refresh_new_messages_threshold,
+            "memory_profile_sample_messages": self.profile_sample_messages,
+            "memory_profile_sample_max_chars": self.profile_sample_max_chars,
+            "memory_recent_topics_limit": self.recent_topics_limit,
+            "memory_recent_events_limit": self.recent_events_limit,
+            "memory_budget_total_tokens": self.budget_total_tokens,
+            "memory_budget_l0_ratio": self.budget_l0_ratio,
+            "memory_budget_l1_ratio": self.budget_l1_ratio,
+            "memory_budget_l2_ratio": self.budget_l2_ratio,
+            "memory_budget_l3_ratio": self.budget_l3_ratio,
+            "memory_budget_l4_ratio": self.budget_l4_ratio,
+            "memory_budget_l5_ratio": self.budget_l5_ratio,
+            "memory_keyword_top_k": self.keyword_top_k,
+            "memory_rerank_enabled": self.rerank_enabled,
+            "memory_rerank_batch_size": self.rerank_batch_size,
         }
 
 
@@ -49,6 +79,23 @@ def get_memory_config() -> MemoryConfig:
         long_summary_max_chars=max(240, get_int("memory_long_summary_max_chars", 1200)),
         profile_max_chars=max(120, get_int("memory_profile_max_chars", 600)),
         memory_item_max=max(20, get_int("memory_item_max", 200)),
+        profile_refresh_new_messages_threshold=max(
+            1, get_int("memory_profile_refresh_new_messages_threshold", 12)
+        ),
+        profile_sample_messages=max(20, get_int("memory_profile_sample_messages", 80)),
+        profile_sample_max_chars=max(1200, get_int("memory_profile_sample_max_chars", 12000)),
+        recent_topics_limit=max(1, get_int("memory_recent_topics_limit", 6)),
+        recent_events_limit=max(1, get_int("memory_recent_events_limit", 6)),
+        budget_total_tokens=max(200, get_int("memory_budget_total_tokens", 1500)),
+        budget_l0_ratio=max(0.0, float(get_setting("memory_budget_l0_ratio", 0.30))),
+        budget_l1_ratio=max(0.0, float(get_setting("memory_budget_l1_ratio", 0.25))),
+        budget_l2_ratio=max(0.0, float(get_setting("memory_budget_l2_ratio", 0.20))),
+        budget_l3_ratio=max(0.0, float(get_setting("memory_budget_l3_ratio", 0.05))),
+        budget_l4_ratio=max(0.0, float(get_setting("memory_budget_l4_ratio", 0.20))),
+        budget_l5_ratio=max(0.0, float(get_setting("memory_budget_l5_ratio", 0.05))),
+        keyword_top_k=max(1, get_int("memory_keyword_top_k", 4)),
+        rerank_enabled=get_bool("memory_rerank_enabled", False),
+        rerank_batch_size=max(1, get_int("memory_rerank_batch_size", 20)),
     )
 
 
@@ -65,6 +112,21 @@ def memory_config_defaults() -> Dict[str, Any]:
         "memory_long_summary_max_chars": 1200,
         "memory_profile_max_chars": 600,
         "memory_item_max": 200,
+        "memory_profile_refresh_new_messages_threshold": 12,
+        "memory_profile_sample_messages": 80,
+        "memory_profile_sample_max_chars": 12000,
+        "memory_recent_topics_limit": 6,
+        "memory_recent_events_limit": 6,
+        "memory_budget_total_tokens": 1500,
+        "memory_budget_l0_ratio": 0.30,
+        "memory_budget_l1_ratio": 0.25,
+        "memory_budget_l2_ratio": 0.20,
+        "memory_budget_l3_ratio": 0.05,
+        "memory_budget_l4_ratio": 0.20,
+        "memory_budget_l5_ratio": 0.05,
+        "memory_keyword_top_k": 4,
+        "memory_rerank_enabled": False,
+        "memory_rerank_batch_size": 20,
     }
 
 
@@ -76,7 +138,20 @@ def normalize_memory_config_updates(updates: Dict[str, Any]) -> Dict[str, Any]:
             continue
         if k.endswith("_enabled"):
             clean[k] = bool(v)
-        elif k.endswith("_limit") or k.endswith("_budget") or k.endswith("_messages") or k.endswith("_chars") or k.endswith("_max"):
+        elif k.endswith("_ratio"):
+            try:
+                clean[k] = float(v)
+            except Exception:
+                continue
+        elif (
+            k.endswith("_limit")
+            or k.endswith("_budget")
+            or k.endswith("_messages")
+            or k.endswith("_chars")
+            or k.endswith("_max")
+            or k.endswith("_seconds")
+            or k.endswith("_threshold")
+        ):
             try:
                 clean[k] = int(v)
             except Exception:
@@ -84,4 +159,3 @@ def normalize_memory_config_updates(updates: Dict[str, Any]) -> Dict[str, Any]:
         else:
             clean[k] = v
     return clean
-

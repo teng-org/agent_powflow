@@ -409,6 +409,13 @@ button.ghost {
   background: #fcfdff;
 }
 
+.db-table tr.group-row td {
+  background: #eef5ff !important;
+  color: #2f4d72;
+  font-weight: 700;
+  border-top: 1px solid #d7e5f9;
+}
+
 .mono {
   font-family: 'IBM Plex Mono', monospace;
 }

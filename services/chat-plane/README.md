@@ -21,6 +21,16 @@
   - `postgres_only` (只用 PostgreSQL)
   - `file_only` (只用本地 JSON)
 - `chat_history_store_path` in runtime config (default `/app/data/chat-plane/chat_history_store.json`)
+- `chat_history_disk_flush_interval_ms` in runtime config (default `800`)
+- P2 memory retrieval settings in runtime config:
+  - `memory_query_rewrite_enabled` / `memory_query_rewrite_use_llm` / `memory_query_rewrite_max_chars`
+  - `memory_query_rewrite_min_chars` / `memory_query_rewrite_min_overlap_ratio` / `memory_query_rewrite_max_len_ratio`
+  - `memory_session_rag_enabled` / `memory_session_rag_top_k`
+  - `memory_session_keyword_top_k`
+  - `memory_session_vector_enabled` / `memory_session_vector_top_k`
+  - `memory_session_fusion_weight_keyword` / `memory_session_fusion_weight_vector` / `memory_session_fusion_weight_recency`
+  - `memory_session_fusion_hybrid_bonus` / `memory_session_fusion_recency_half_life_days`
+  - `chat_session_vector_collection` / `chat_session_vector_timeout_seconds`
 
 ## API
 
@@ -37,3 +47,5 @@
 - `GET/POST/DELETE /api/v1/admin/chat/api-pool`
 - `POST /api/v1/admin/chat/api-pool/{endpoint_id}/set-default`
 - `POST /api/v1/admin/chat/api-pool/reload-default`
+- `GET /api/v1/admin/chat/store/status`
+- `POST /api/v1/admin/chat/store/flush`
