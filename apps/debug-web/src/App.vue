@@ -3,13 +3,15 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { endpointGroups } from './endpoints'
 
 const globalConfig = reactive({
-  controlPlaneBaseUrl: 'http://localhost:8080',
+  controlPlaneBaseUrl: 'http://127.0.0.1:8099',
   executionBaseUrl: 'http://localhost:8091',
+  chatBaseUrl: 'http://localhost:8092',
   tenantId: 'platform',
   actorId: 'debug-user',
   sourceService: 'debug-web',
   traceId: '',
   adminToken: 'dev-admin-token',
+  controlPlaneToken: '',
   adminUsername: 'admin',
   adminPassword: 'admin123',
 })
@@ -69,7 +71,9 @@ const selectedEndpointDoc = computed(() => {
       url: buildUrl(ep, st),
       headers: {
         ...st.headers,
-        ...(ep.path.startsWith('/api/v1/admin/') ? { Authorization: `Bearer ${globalConfig.adminToken}` } : {}),
+        ...(ep.path.startsWith('/api/v1/admin/')
+          ? { Authorization: `Bearer ${ep.baseKey === 'controlPlaneBaseUrl' ? (globalConfig.controlPlaneToken || globalConfig.adminToken) : globalConfig.adminToken}` }
+          : {}),
         'X-Tenant-Id': globalConfig.tenantId,
         'X-Actor-Id': globalConfig.actorId,
         'X-Source-Service': globalConfig.sourceService,
@@ -100,6 +104,13 @@ const dbviz = reactive({
   pgPage: 1,
   pgPageSize: 20,
   pgTotal: 0,
+  cpOverview: null,
+  cpTables: [],
+  cpTable: 'users',
+  cpRows: [],
+  cpPage: 1,
+  cpPageSize: 20,
+  cpTotal: 0,
   qdrantCollections: [],
   qdrantCollection: '',
   qdrantPoints: [],
@@ -151,6 +162,7 @@ const dbviz = reactive({
   runtimeConfigDirty: false,
 })
 const pgTotalPages = computed(() => Math.max(1, Math.ceil((dbviz.pgTotal || 0) / (dbviz.pgPageSize || 1))))
+const cpTotalPages = computed(() => Math.max(1, Math.ceil((dbviz.cpTotal || 0) / (dbviz.cpPageSize || 1))))
 const mongoTotalPages = computed(() => Math.max(1, Math.ceil((dbviz.mongoTotal || 0) / (dbviz.mongoPageSize || 1))))
 const usageTotalPages = computed(() => Math.max(1, Math.ceil((dbviz.usageTotal || 0) / (dbviz.usagePageSize || 1))))
 
@@ -161,6 +173,13 @@ function formatCny(value, digits = 4) {
 }
 
 const methodClass = (method) => `method-${method.toLowerCase()}`
+
+function isLikelySignedToken(token) {
+  const t = String(token || '').trim()
+  if (!t) return false
+  const dots = (t.match(/\./g) || []).length
+  return dots === 1 || dots === 2
+}
 
 function pathWithParams(endpoint, pathParams) {
   let path = endpoint.path
@@ -244,8 +263,14 @@ async function invokeEndpoint() {
     'X-Actor-Id': globalConfig.actorId,
     'X-Source-Service': globalConfig.sourceService,
   }
+  if (endpoint.baseKey === 'controlPlaneBaseUrl' && endpoint.path.startsWith('/api/v1/admin/')) {
+    await ensureControlPlaneToken()
+  }
   if (endpoint.path.startsWith('/api/v1/admin/')) {
-    headers.Authorization = `Bearer ${globalConfig.adminToken}`
+    const token = endpoint.baseKey === 'controlPlaneBaseUrl'
+      ? (globalConfig.controlPlaneToken || globalConfig.adminToken)
+      : globalConfig.adminToken
+    headers.Authorization = `Bearer ${token}`
   }
 
   if (globalConfig.traceId?.trim()) {
@@ -306,8 +331,11 @@ function resetEndpoint() {
 }
 
 function dbvizHeaders() {
+  const token = dbviz.source === 'cp-postgres'
+    ? (globalConfig.controlPlaneToken || globalConfig.adminToken)
+    : globalConfig.adminToken
   return {
-    Authorization: `Bearer ${globalConfig.adminToken}`,
+    Authorization: `Bearer ${token}`,
     'X-Tenant-Id': globalConfig.tenantId,
     'X-Actor-Id': globalConfig.actorId,
     'X-Source-Service': globalConfig.sourceService,
@@ -315,8 +343,8 @@ function dbvizHeaders() {
   }
 }
 
-async function fetchJson(path, query = null) {
-  const base = globalConfig.executionBaseUrl.trim().replace(/\/$/, '')
+async function fetchJsonByBase(baseUrl, path, query = null) {
+  const base = baseUrl.trim().replace(/\/$/, '')
   const url = new URL(`${base}${path}`)
   if (query) {
     Object.entries(query).forEach(([k, v]) => {
@@ -332,10 +360,32 @@ async function fetchJson(path, query = null) {
   return response.json()
 }
 
+async function fetchJson(path, query = null) {
+  return fetchJsonByBase(globalConfig.executionBaseUrl, path, query)
+}
+
+async function fetchJsonControlPlane(path, query = null) {
+  await ensureControlPlaneToken()
+  return fetchJsonByBase(globalConfig.controlPlaneBaseUrl, path, query)
+}
+
 async function loadDbviz() {
   dbviz.loading = true
   dbviz.error = ''
   try {
+    if (dbviz.source === 'cp-postgres') {
+      const scopeQuery = { tenant_scope: dbviz.tenantScope }
+      const [cpOverviewResp, cpTablesResp] = await Promise.all([
+        fetchJsonControlPlane('/api/v1/admin/dbviz/overview', scopeQuery),
+        fetchJsonControlPlane('/api/v1/admin/dbviz/postgres/tables', scopeQuery),
+      ])
+      dbviz.cpOverview = cpOverviewResp
+      dbviz.cpTables = cpTablesResp.items || []
+      if (!dbviz.cpTable && dbviz.cpTables.length) dbviz.cpTable = dbviz.cpTables[0].table
+      await loadControlPlaneRows()
+      return
+    }
+
     const scopeQuery = { tenant_scope: dbviz.tenantScope }
     const [overviewResp, pgTablesResp, qdrantResp, mongoResp] = await Promise.all([
       fetchJson('/api/v1/admin/dbviz/overview', scopeQuery),
@@ -379,6 +429,17 @@ async function loadPgRows() {
   })
   dbviz.pgRows = resp.items || []
   dbviz.pgTotal = Number(resp.total || 0)
+}
+
+async function loadControlPlaneRows() {
+  if (!dbviz.cpTable) return
+  const resp = await fetchJsonControlPlane(`/api/v1/admin/dbviz/postgres/table/${encodeURIComponent(dbviz.cpTable)}`, {
+    tenant_scope: dbviz.tenantScope,
+    page: dbviz.cpPage,
+    page_size: dbviz.cpPageSize,
+  })
+  dbviz.cpRows = resp.items || []
+  dbviz.cpTotal = Number(resp.total || 0)
 }
 
 async function loadQdrantPoints(reset = false) {
@@ -556,7 +617,7 @@ async function loadStatus() {
     }
   }
 
-  const [kbsCheck, tasksCheck, apiPoolCheck, auxApiPoolCheck, usageCheck] = await Promise.all([
+  const [kbsCheck, tasksCheck, apiPoolCheck, auxApiPoolCheck, usageCheck, chatPlaneCheck] = await Promise.all([
     timed('知识库列表', () => fetchJson('/api/v1/admin/kbs')),
     timed('任务系统', () => fetchJson('/api/v1/admin/tasks', { limit: 200 })),
     timed('主 API 池', () => fetchJson('/api/v1/admin/api-pool')),
@@ -566,9 +627,15 @@ async function loadStatus() {
       days: 7,
       limit: 20,
     })),
+    timed('Chat Plane 健康', async () => {
+      const base = globalConfig.chatBaseUrl.trim().replace(/\/$/, '')
+      const resp = await fetch(`${base}/api/v1/system/health`, { headers: dbvizHeaders() })
+      if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText} (/api/v1/system/health@chat)`)
+      return resp.json()
+    }),
   ])
 
-  const checks = [kbsCheck, tasksCheck, apiPoolCheck, auxApiPoolCheck, usageCheck]
+  const checks = [kbsCheck, tasksCheck, apiPoolCheck, auxApiPoolCheck, usageCheck, chatPlaneCheck]
   dbviz.statusChecks = checks
 
   const kbsItems = kbsCheck?.data?.items || []
@@ -692,6 +759,41 @@ async function loginAdminToken() {
   }
 }
 
+async function doControlPlaneLogin() {
+  const base = globalConfig.controlPlaneBaseUrl.trim().replace(/\/$/, '')
+  const response = await fetch(`${base}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      tenantCode: globalConfig.tenantId || null,
+      username: globalConfig.adminUsername,
+      password: globalConfig.adminPassword,
+    }),
+  })
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText} (/api/v1/auth/login@control-plane)`)
+  }
+  const data = await response.json()
+  if (!data?.accessToken) {
+    throw new Error('Control-plane login success but accessToken is empty')
+  }
+  globalConfig.controlPlaneToken = data.accessToken
+}
+
+async function ensureControlPlaneToken() {
+  if (isLikelySignedToken(globalConfig.controlPlaneToken)) return
+  await doControlPlaneLogin()
+}
+
+async function loginControlPlaneToken() {
+  dbviz.error = ''
+  try {
+    await doControlPlaneLogin()
+  } catch (err) {
+    dbviz.error = err instanceof Error ? err.message : String(err)
+  }
+}
+
 async function loginAndEnter() {
   auth.error = ''
   auth.loggingIn = true
@@ -719,6 +821,7 @@ async function loginAndEnter() {
       throw new Error('Login success but access_token is empty')
     }
     globalConfig.adminToken = data.access_token
+    await loginControlPlaneToken()
     auth.loggedIn = true
     if (selectedId.value === '__dbviz__') {
       await loadDbviz()
@@ -747,12 +850,17 @@ watch(
   () => dbviz.source,
   async (v) => {
     if (selectedId.value !== '__dbviz__') return
-    if (v === 'usage' || v === 'status') {
+    if (v === 'usage' || v === 'status' || v === 'cp-postgres') {
+      if (v === 'cp-postgres' && dbviz.tenantScope === 'current') {
+        dbviz.tenantScope = 'all'
+      }
       dbviz.loading = true
       dbviz.error = ''
       try {
         if (v === 'usage') {
           await loadUsage()
+        } else if (v === 'cp-postgres') {
+          await loadDbviz()
         } else {
           await loadStatus()
         }
@@ -778,6 +886,10 @@ onBeforeUnmount(() => clearStatusTimer())
       <h2>Admin Login</h2>
       <p class="subtitle">登录后自动写入 Admin Token，用于所有 `/api/v1/admin/*` 接口调试。</p>
       <div class="grid two">
+        <label>
+          Control Plane URL
+          <input v-model="globalConfig.controlPlaneBaseUrl" />
+        </label>
         <label>
           Execution URL
           <input v-model="globalConfig.executionBaseUrl" />
@@ -844,8 +956,20 @@ onBeforeUnmount(() => clearStatusTimer())
             <input v-model="globalConfig.executionBaseUrl" />
           </label>
           <label>
-            Admin Token
+            Control Plane URL
+            <input v-model="globalConfig.controlPlaneBaseUrl" />
+          </label>
+          <label>
+            Chat Plane URL
+            <input v-model="globalConfig.chatBaseUrl" />
+          </label>
+          <label>
+            Execution Admin Token
             <input v-model="globalConfig.adminToken" />
+          </label>
+          <label>
+            Control Plane Token
+            <input v-model="globalConfig.controlPlaneToken" />
           </label>
           <label>
             Admin Username
@@ -875,6 +999,7 @@ onBeforeUnmount(() => clearStatusTimer())
             <select v-model="dbviz.source">
               <option value="status">系统状态</option>
               <option value="postgres">PostgreSQL</option>
+              <option value="cp-postgres">ControlPlane PostgreSQL</option>
               <option value="qdrant">Qdrant</option>
               <option value="mongo">MongoDB</option>
               <option value="usage">API Token Usage</option>
@@ -882,13 +1007,14 @@ onBeforeUnmount(() => clearStatusTimer())
           </label>
         </div>
         <div class="actions">
-          <button class="ghost" @click="loginAdminToken">获取 JWT</button>
+          <button class="ghost" @click="loginAdminToken">获取 Execution JWT</button>
+          <button class="ghost" @click="loginControlPlaneToken">获取 Control-Plane JWT</button>
           <button class="primary" @click="loadDbviz" :disabled="dbviz.loading">{{ dbviz.loading ? 'Loading...' : 'Refresh' }}</button>
         </div>
         <p v-if="dbviz.error" class="error-text">{{ dbviz.error }}</p>
       </section>
 
-      <section class="panel">
+      <section class="panel" v-if="dbviz.source !== 'cp-postgres'">
         <div class="dbviz-cards">
           <div class="dbviz-card">
             <strong>PG documents</strong>
@@ -905,6 +1031,19 @@ onBeforeUnmount(() => clearStatusTimer())
           <div class="dbviz-card">
             <strong>Qdrant collections</strong>
             <span>{{ dbviz.overview?.qdrant?.collections || 0 }}</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" v-if="dbviz.source === 'cp-postgres'">
+        <div class="dbviz-cards">
+          <div class="dbviz-card">
+            <strong>Tenant Scope</strong>
+            <span>{{ dbviz.tenantScope }}</span>
+          </div>
+          <div class="dbviz-card" v-for="item in (dbviz.cpOverview?.items || [])" :key="`cp-overview-${item.table}`">
+            <strong>{{ item.table }}</strong>
+            <span>{{ item.rows || 0 }}</span>
           </div>
         </div>
       </section>
@@ -1088,6 +1227,41 @@ onBeforeUnmount(() => clearStatusTimer())
                   >
                     {{ typeof row[col] === 'object' ? JSON.stringify(row[col]) : row[col] }}
                   </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel" v-if="dbviz.source === 'cp-postgres'">
+        <div class="endpoint-head">
+          <h2>Control-Plane PostgreSQL</h2>
+          <label class="inline-select">
+            Table
+            <select v-model="dbviz.cpTable" @change="dbviz.cpPage = 1; loadControlPlaneRows()">
+              <option v-for="item in dbviz.cpTables" :key="item.table" :value="item.table">
+                {{ item.table }} ({{ item.rows }})
+              </option>
+            </select>
+          </label>
+          <div class="actions">
+            <button class="ghost" @click="dbviz.cpPage = Math.max(1, dbviz.cpPage - 1); loadControlPlaneRows()">Prev</button>
+            <button class="ghost" @click="dbviz.cpPage += 1; loadControlPlaneRows()">Next</button>
+          </div>
+        </div>
+        <p class="subtitle">page={{ dbviz.cpPage }}/{{ cpTotalPages }}, size={{ dbviz.cpPageSize }}, total={{ dbviz.cpTotal }}</p>
+        <div class="table-wrap">
+          <table class="db-table">
+            <thead>
+              <tr>
+                <th v-for="col in (dbviz.cpRows[0] ? Object.keys(dbviz.cpRows[0]) : [])" :key="col">{{ col }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, idx) in dbviz.cpRows" :key="`cp-row-${idx}`">
+                <td v-for="(value, col) in row" :key="`cp-cell-${idx}-${col}`" class="mono">
+                  <span class="cell-ellipsis" :title="String(value ?? '')">{{ value }}</span>
                 </td>
               </tr>
             </tbody>
@@ -1565,6 +1739,10 @@ onBeforeUnmount(() => clearStatusTimer())
           <label>
             Admin Token
             <input v-model="globalConfig.adminToken" />
+          </label>
+          <label>
+            Control Plane Token
+            <input v-model="globalConfig.controlPlaneToken" />
           </label>
         </div>
       </section>

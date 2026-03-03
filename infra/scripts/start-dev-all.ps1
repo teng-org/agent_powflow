@@ -47,14 +47,34 @@ $kbProc = Start-Process -FilePath "powershell" -ArgumentList @(
   "-Command", $kbCmd
 ) -WorkingDirectory (Join-Path $root "apps/kb-admin-web") -PassThru
 
+Write-Host "Starting web-app..."
+$webCmd = "`$env:WEB_APP_PORT='$($ports.web_app_port)'; npm run dev"
+$webProc = Start-Process -FilePath "powershell" -ArgumentList @(
+  "-NoProfile",
+  "-ExecutionPolicy", "Bypass",
+  "-Command", $webCmd
+) -WorkingDirectory (Join-Path $root "apps/web-app") -PassThru
+
+Write-Host "Starting web-admin..."
+$webAdminCmd = "`$env:WEB_ADMIN_PORT='$($ports.web_admin_port)'; npm run dev"
+$webAdminProc = Start-Process -FilePath "powershell" -ArgumentList @(
+  "-NoProfile",
+  "-ExecutionPolicy", "Bypass",
+  "-Command", $webAdminCmd
+) -WorkingDirectory (Join-Path $root "apps/web-admin") -PassThru
+
 $pidPayload = [ordered]@{
   generated_at = (Get-Date).ToString("s")
   debug_web_pid = $debugProc.Id
   kb_admin_web_pid = $kbProc.Id
+  web_app_pid = $webProc.Id
+  web_admin_pid = $webAdminProc.Id
 }
 $pidPayload | ConvertTo-Json | Set-Content -Path $pidFilePath -Encoding utf8
 
 Write-Host "Started frontends."
 Write-Host "debug-web   : http://localhost:$($ports.debug_web_port) (PID: $($debugProc.Id))"
 Write-Host "kb-admin-web: http://localhost:$($ports.kb_admin_web_port) (PID: $($kbProc.Id))"
+Write-Host "web-app     : http://localhost:$($ports.web_app_port) (PID: $($webProc.Id))"
+Write-Host "web-admin   : http://localhost:$($ports.web_admin_port) (PID: $($webAdminProc.Id))"
 Write-Host "PID file: $pidFilePath"

@@ -7,7 +7,7 @@ spring:
     password: ${SPRING_DATASOURCE_PASSWORD:apf}
   jpa:
     hibernate:
-      ddl-auto: none
+      ddl-auto: update
     properties:
       hibernate:
         format_sql: true
@@ -20,3 +20,13 @@ management:
 
 server:
   port: ${CONTROL_PLANE_PORT:8080}
+
+control-plane:
+  auth:
+    admin-username: ${CONTROL_PLANE_ADMIN_USERNAME:${EXECUTION_ADMIN_USERNAME:admin}}
+    admin-password: ${CONTROL_PLANE_ADMIN_PASSWORD:${EXECUTION_ADMIN_PASSWORD:admin123}}
+    admin-role: ${CONTROL_PLANE_ADMIN_ROLE:${EXECUTION_ADMIN_ROLE:PLATFORM_ADMIN}}
+    admin-tenant-id: ${CONTROL_PLANE_ADMIN_TENANT_ID:platform}
+    jwt-secret: ${CONTROL_PLANE_JWT_SECRET:${EXECUTION_JWT_SECRET:change-me-in-production}}
+    access-ttl-seconds: ${CONTROL_PLANE_ACCESS_TTL_SECONDS:${EXECUTION_JWT_TTL_SECONDS:43200}}
+    refresh-ttl-seconds: ${CONTROL_PLANE_REFRESH_TTL_SECONDS:604800}

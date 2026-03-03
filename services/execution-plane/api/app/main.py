@@ -60,7 +60,9 @@ SUPPORTED_DBVIZ_TABLES = {
     "api_token_usage",
     "api_usage_budgets",
     "api_usage_alerts",
+    "chat_history_store_snapshots",
 }
+DBVIZ_NON_TENANT_TABLES = {"system_settings", "chat_history_store_snapshots"}
 
 cors_origins = os.getenv("EXECUTION_CORS_ORIGINS", "http://localhost:5177,http://localhost:5180")
 allowed_origins = [item.strip() for item in cors_origins.split(",") if item.strip()]
@@ -2180,7 +2182,7 @@ async def dbviz_overview(
                 cur.execute(sql.SQL("SELECT COUNT(*)::bigint AS c FROM {}").format(sql.Identifier(table)))
                 pg_counts[table] = int((cur.fetchone() or {}).get("c", 0))
             else:
-                if table in {"system_settings"}:
+                if table in DBVIZ_NON_TENANT_TABLES:
                     cur.execute(sql.SQL("SELECT COUNT(*)::bigint AS c FROM {}").format(sql.Identifier(table)))
                 else:
                     cur.execute(
@@ -2210,7 +2212,7 @@ async def dbviz_postgres_tables(
     items: list[dict] = []
     with kb_store._conn() as conn, conn.cursor() as cur:
         for table in sorted(SUPPORTED_DBVIZ_TABLES):
-            if include_all_tenants or table == "system_settings":
+            if include_all_tenants or table in DBVIZ_NON_TENANT_TABLES:
                 cur.execute(sql.SQL("SELECT COUNT(*)::bigint AS c FROM {}").format(sql.Identifier(table)))
             else:
                 cur.execute(
@@ -2242,10 +2244,10 @@ async def dbviz_postgres_table_rows(
 
     where_parts: list[sql.Composed] = []
     params: list = []
-    if not include_all_tenants and table != "system_settings":
+    if not include_all_tenants and table not in DBVIZ_NON_TENANT_TABLES:
         where_parts.append(sql.SQL("tenant_id = %s"))
         params.append(tenant_id)
-    if tenant_id_filter and table != "system_settings":
+    if tenant_id_filter and table not in DBVIZ_NON_TENANT_TABLES:
         where_parts.append(sql.SQL("tenant_id = %s"))
         params.append(tenant_id_filter)
     if kb_id_filter and table in {"knowledge_bases", "documents", "chunks", "tasks", "task_events", "chunk_drafts"}:

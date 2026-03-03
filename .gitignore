@@ -33,3 +33,6 @@ config/stack.generated.env
 .DS_Store
 Thumbs.db
 .idea/
+
+# example frontend
+apps/example-frontend

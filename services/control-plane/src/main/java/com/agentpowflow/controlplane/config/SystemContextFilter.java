@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.UUID;
 
 @Component
@@ -21,8 +22,8 @@ public class SystemContextFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
-        String tenantId = headerOrDefault(request, HEADER_TENANT_ID, "dev-tenant");
-        String actorId = headerOrDefault(request, HEADER_ACTOR_ID, "system");
+        String tenantId = attrOrHeaderOrDefault(request, "auth.tenant_id", HEADER_TENANT_ID, "dev-tenant");
+        String actorId = attrOrHeaderOrDefault(request, "auth.actor_id", HEADER_ACTOR_ID, "system");
         String traceId = headerOrDefault(request, HEADER_TRACE_ID, UUID.randomUUID().toString());
         String sourceService = headerOrDefault(request, HEADER_SOURCE_SERVICE, "control-plane");
 
@@ -42,5 +43,16 @@ public class SystemContextFilter extends OncePerRequestFilter {
             return fallback;
         }
         return value;
+    }
+
+    private String attrOrHeaderOrDefault(HttpServletRequest request, String attrName, String headerName, String fallback) {
+        Object attr = request.getAttribute(attrName);
+        if (attr instanceof String s && !s.isBlank()) {
+            return s;
+        }
+        if (attr instanceof List<?> list && !list.isEmpty()) {
+            return String.valueOf(list.getFirst());
+        }
+        return headerOrDefault(request, headerName, fallback);
     }
 }

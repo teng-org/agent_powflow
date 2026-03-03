@@ -26,6 +26,12 @@ if (Test-Path $pidFilePath) {
   if ($pids.kb_admin_web_pid) {
     Stop-IfRunning -pid ([int]$pids.kb_admin_web_pid) -name "kb-admin-web"
   }
+  if ($pids.web_app_pid) {
+    Stop-IfRunning -pid ([int]$pids.web_app_pid) -name "web-app"
+  }
+  if ($pids.web_admin_pid) {
+    Stop-IfRunning -pid ([int]$pids.web_admin_pid) -name "web-admin"
+  }
   Remove-Item $pidFilePath -Force
   Write-Host "Removed PID file: $pidFilePath"
 } else {
