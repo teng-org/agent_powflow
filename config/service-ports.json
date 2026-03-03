@@ -1,6 +1,7 @@
 {
   "control_plane_port": 8099,
   "execution_api_port": 8091,
+  "chat_plane_port": 8092,
   "debug_web_port": 5177,
   "kb_admin_web_port": 5180,
   "web_app_port": 5173,

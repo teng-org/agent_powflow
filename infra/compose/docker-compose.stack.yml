@@ -69,9 +69,15 @@ services:
     container_name: agentpowflow-control-plane
     restart: unless-stopped
     ports:
-      - "${CONTROL_PLANE_PORT:-8080}:8080"
+      - "${CONTROL_PLANE_PORT:-8080}:${CONTROL_PLANE_PORT:-8080}"
     environment:
       CONTROL_PLANE_PORT: ${CONTROL_PLANE_PORT:-8080}
+      CONTROL_PLANE_JWT_SECRET: ${EXECUTION_JWT_SECRET:-change-me-in-production}
+      CONTROL_PLANE_ADMIN_USERNAME: ${EXECUTION_ADMIN_USERNAME:-admin}
+      CONTROL_PLANE_ADMIN_PASSWORD: ${EXECUTION_ADMIN_PASSWORD:-admin123}
+      CONTROL_PLANE_ADMIN_ROLE: ${EXECUTION_ADMIN_ROLE:-PLATFORM_ADMIN}
+      CONTROL_PLANE_ADMIN_TENANT_ID: ${CONTROL_PLANE_ADMIN_TENANT_ID:-platform}
+      CONTROL_PLANE_ACCESS_TTL_SECONDS: ${EXECUTION_JWT_TTL_SECONDS:-43200}
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/agentpowflow
       SPRING_DATASOURCE_USERNAME: apf
       SPRING_DATASOURCE_PASSWORD: apf
@@ -148,6 +154,28 @@ services:
       - postgres
     volumes:
       - ../../config:/app/config:ro
+
+  chat-plane:
+    build:
+      context: ../..
+      dockerfile: services/chat-plane/Dockerfile
+    container_name: agentpowflow-chat-plane
+    restart: unless-stopped
+    ports:
+      - "${CHAT_PLANE_PORT:-8092}:8092"
+    environment:
+      CHAT_PLANE_PORT: ${CHAT_PLANE_PORT:-8092}
+      EXECUTION_API_BASE_URL: http://execution-api:8090
+      EXECUTION_ADMIN_TOKEN: ${EXECUTION_ADMIN_TOKEN:-dev-admin-token}
+      CHAT_API_POOL_DEFAULT_CONFIG: /app/services/chat-plane/config/chat_api_pool.default.json
+      RUNTIME_CONFIG_PATH: /app/config/runtime-config.json
+      POSTGRES_DSN: postgresql://apf:apf@postgres:5432/agentpowflow
+    depends_on:
+      - execution-api
+      - postgres
+    volumes:
+      - ../../config:/app/config:ro
+      - ../../data:/app/data
 
 volumes:
   postgres_data:

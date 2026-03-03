@@ -1,0 +1,35 @@
+{
+  "default_endpoint_id": "chat-llm-default",
+  "default_endpoint_ids": {
+    "chat_llm": "chat-llm-default",
+    "chat_embedding": "chat-embedding-default"
+  },
+  "endpoints": [
+    {
+      "endpoint_id": "chat-llm-default",
+      "name": "Chat LLM Default",
+      "provider": "openai_compatible",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "model": "deepseek-ai/DeepSeek-V3.2",
+      "task": "chat_llm",
+      "api_key": "",
+      "tenant_id": "*",
+      "enabled": true,
+      "input_per_1k": 0.0,
+      "output_per_1k": 0.0
+    },
+    {
+      "endpoint_id": "chat-embedding-default",
+      "name": "Chat Embedding Default",
+      "provider": "openai_compatible",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "model": "BAAI/bge-m3",
+      "task": "chat_embedding",
+      "api_key": "",
+      "tenant_id": "*",
+      "enabled": true,
+      "input_per_1k": 0.0,
+      "output_per_1k": 0.0
+    }
+  ]
+}

@@ -8,3 +8,6 @@
 - `docs/decisions/ADR-002-domain-boundary-and-canvas-execution.zh-CN.md`
 - `docs/decisions/ADR-003-tenant-isolation-v1.md`
 - `docs/decisions/ADR-004-runtime-and-queue-topology.md`
+- `docs/decisions/ADR-005-agent-core-chat-memory-tools-first.zh-CN.md`
+- `docs/decisions/ADR-006-springboot-controlplane-chatplane-strong-auth-integration.zh-CN.md`
+- `docs/decisions/ADR-007-chat-plane-tenant-enforcement.zh-CN.md`

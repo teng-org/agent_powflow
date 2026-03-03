@@ -14,6 +14,7 @@ $ports = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 $mapping = @{
   "CONTROL_PLANE_PORT"      = [string]$ports.control_plane_port
   "EXECUTION_API_PORT"      = [string]$ports.execution_api_port
+  "CHAT_PLANE_PORT"         = [string]$ports.chat_plane_port
   "DEBUG_WEB_PORT"          = [string]$ports.debug_web_port
   "KB_ADMIN_WEB_PORT"       = [string]$ports.kb_admin_web_port
   "WEB_APP_PORT"            = [string]$ports.web_app_port
