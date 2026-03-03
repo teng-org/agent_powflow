@@ -40,11 +40,11 @@ except Exception:  # pragma: no cover
 
 app = FastAPI(title="execution-api", version="0.4.0")
 SUPPORTED_CHUNK_METHODS = {"fixed", "sentence", "paragraph", "markdown", "delimiter"}
-ADMIN_TOKEN = os.getenv("EXECUTION_ADMIN_TOKEN", "dev-admin-token")
+ADMIN_TOKEN = os.getenv("EXECUTION_ADMIN_TOKEN", "")
 ADMIN_USERNAME = os.getenv("EXECUTION_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("EXECUTION_ADMIN_PASSWORD", "admin123")
 ADMIN_ROLE = os.getenv("EXECUTION_ADMIN_ROLE", "PLATFORM_ADMIN")
-JWT_SECRET = os.getenv("EXECUTION_JWT_SECRET", ADMIN_TOKEN)
+JWT_SECRET = os.getenv("EXECUTION_JWT_SECRET", "change-me-in-production")
 JWT_TTL_SECONDS = int(os.getenv("EXECUTION_JWT_TTL_SECONDS", "43200"))
 AUDIT_ENABLED = os.getenv("EXECUTION_AUDIT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 AUDIT_BASE_DIR = os.getenv("EXECUTION_AUDIT_BASE_DIR", os.path.join("logs", "kb-audit"))
@@ -61,8 +61,27 @@ SUPPORTED_DBVIZ_TABLES = {
     "api_usage_budgets",
     "api_usage_alerts",
     "chat_history_store_snapshots",
+    "chat_sessions",
+    "chat_messages",
+    "chat_session_memory",
+    "chat_user_profiles",
+    "chat_memory_items",
+    "chat_session_summaries",
+    "chat_user_recent_activities",
+    "chat_memory_fusion_logs",
+    "chat_session_segments",
+    "chat_runs",
 }
-DBVIZ_NON_TENANT_TABLES = {"system_settings", "chat_history_store_snapshots"}
+DBVIZ_NON_TENANT_TABLES = {
+    "system_settings",
+    "chat_history_store_snapshots",
+    "chat_sessions",
+    "chat_messages",
+    "chat_session_memory",
+    "chat_user_profiles",
+    "chat_memory_items",
+    "chat_runs",
+}
 
 cors_origins = os.getenv("EXECUTION_CORS_ORIGINS", "http://localhost:5177,http://localhost:5180")
 allowed_origins = [item.strip() for item in cors_origins.split(",") if item.strip()]
@@ -93,6 +112,14 @@ class ApiCreateKbRequest(BaseModel):
 
 class ApiRenameKbRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
+
+
+class ApiKbVisibilityRequest(BaseModel):
+    visibility: str = Field(pattern="^(PRIVATE|SHARED_ALL)$")
+
+
+class ApiKbBindingRequest(BaseModel):
+    target_tenant_id: str = Field(min_length=1, max_length=128)
 
 
 class ApiAgentRunRequest(BaseModel):
@@ -285,6 +312,17 @@ def _save_runtime_config_json(data: dict) -> None:
 
 
 RUNTIME_CONFIG_ALLOWED_KEYS = {
+    "execution_admin_token",
+    "execution_admin_username",
+    "execution_admin_password",
+    "execution_admin_role",
+    "execution_jwt_secret",
+    "execution_jwt_ttl_seconds",
+    "execution_env",
+    "execution_audit_enabled",
+    "execution_audit_base_dir",
+    "global_kb_id",
+    "siliconflow_api_key",
     "embedding_mode",
     "embedding_max_chars",
     "summary_segment_chars",
@@ -302,6 +340,48 @@ RUNTIME_CONFIG_ALLOWED_KEYS = {
     "summary_kb_batch_max_tokens",
     "summary_kb_max_chars",
     "summary_kb_final_max_tokens",
+    "chat_system_prompt",
+    "chat_default_top_k",
+    "chat_default_rank_method",
+    "chat_llm_base_url",
+    "chat_llm_model",
+    "chat_llm_api_key",
+    "chat_jwt_secret",
+    "chat_allow_legacy_admin_token",
+    "chat_history_store_backend",
+    "chat_history_store_path",
+    "chat_session_vector_collection",
+    "chat_session_vector_timeout_seconds",
+    "memory_auto_summary_enabled",
+    "memory_hierarchical_enabled",
+    "memory_user_profile_enabled",
+    "memory_eviction_enabled",
+    "memory_recent_messages_limit",
+    "memory_context_char_budget",
+    "memory_compress_trigger_messages",
+    "memory_short_summary_max_chars",
+    "memory_long_summary_max_chars",
+    "memory_profile_max_chars",
+    "memory_item_max",
+    "memory_query_rewrite_enabled",
+    "memory_query_rewrite_use_llm",
+    "memory_query_rewrite_max_chars",
+    "memory_query_rewrite_min_chars",
+    "memory_query_rewrite_min_overlap_ratio",
+    "memory_query_rewrite_max_len_ratio",
+    "memory_session_rag_enabled",
+    "memory_session_rag_top_k",
+    "memory_session_keyword_top_k",
+    "memory_session_vector_enabled",
+    "memory_session_vector_top_k",
+    "memory_session_fusion_weight_keyword",
+    "memory_session_fusion_weight_vector",
+    "memory_session_fusion_weight_recency",
+    "memory_session_fusion_hybrid_bonus",
+    "memory_session_fusion_recency_half_life_days",
+    "memory_recent_profile_activity_limit",
+    "memory_recent_activity_ttl_seconds",
+    "memory_recent_activity_cleanup_interval_seconds",
     "api_slot_max_per_endpoint",
     "api_slot_wait_seconds",
     "api_slot_ttl_seconds",
@@ -626,7 +706,7 @@ async def admin_logout(request: Request, _: dict = Depends(require_kb_read)) -> 
 
 @app.get("/api/v1/admin/kbs")
 async def list_kbs(request: Request, _: dict = Depends(require_kb_read)) -> Dict:
-    items = kb_store.list_kbs(request.state.tenant_id)
+    items = kb_store.list_accessible_kbs(request.state.tenant_id)
     return {"status": "ok", "items": items, "trace_id": request.state.trace_id}
 
 
@@ -669,6 +749,54 @@ async def freeze_kb(kb_id: str, body: ApiFreezeRequest, request: Request, _: dic
     if not item:
         raise HTTPException(status_code=404, detail="kb not found")
     return {"status": "ok", "item": item, "trace_id": request.state.trace_id}
+
+
+@app.patch("/api/v1/admin/kbs/{kb_id}/visibility")
+async def set_kb_visibility(kb_id: str, body: ApiKbVisibilityRequest, request: Request, _: dict = Depends(require_kb_write)) -> Dict:
+    try:
+        item = kb_store.set_kb_visibility(request.state.tenant_id, kb_id, body.visibility)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not item:
+        raise HTTPException(status_code=404, detail="kb not found")
+    return {"status": "ok", "item": item, "trace_id": request.state.trace_id}
+
+
+@app.get("/api/v1/admin/kbs/{kb_id}/bindings")
+async def list_kb_bindings(kb_id: str, request: Request, _: dict = Depends(require_kb_write)) -> Dict:
+    item = kb_store.get_kb(request.state.tenant_id, kb_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="kb not found")
+    items = kb_store.list_kb_bindings(request.state.tenant_id, kb_id)
+    return {"status": "ok", "kb_id": kb_id, "items": items, "trace_id": request.state.trace_id}
+
+
+@app.put("/api/v1/admin/kbs/{kb_id}/bindings")
+async def upsert_kb_binding(kb_id: str, body: ApiKbBindingRequest, request: Request, _: dict = Depends(require_kb_write)) -> Dict:
+    try:
+        item = kb_store.upsert_kb_binding(
+            owner_tenant_id=request.state.tenant_id,
+            kb_id=kb_id,
+            target_tenant_id=body.target_tenant_id,
+            actor_id=request.state.actor_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not item:
+        raise HTTPException(status_code=404, detail="kb not found")
+    return {"status": "ok", "item": item, "trace_id": request.state.trace_id}
+
+
+@app.delete("/api/v1/admin/kbs/{kb_id}/bindings/{target_tenant_id}")
+async def delete_kb_binding(kb_id: str, target_tenant_id: str, request: Request, _: dict = Depends(require_kb_write)) -> Dict:
+    ok = kb_store.delete_kb_binding(
+        owner_tenant_id=request.state.tenant_id,
+        kb_id=kb_id,
+        target_tenant_id=target_tenant_id,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="binding not found")
+    return {"status": "ok", "kb_id": kb_id, "target_tenant_id": target_tenant_id, "trace_id": request.state.trace_id}
 
 
 @app.post("/api/v1/admin/kbs/{kb_id}/summarize")
@@ -1846,23 +1974,52 @@ async def get_task_status(task_id: str, request: Request) -> Dict:
 
 @app.post("/api/v1/retrieval/search")
 async def retrieval_search(body: ApiSearchRequest, request: Request) -> Dict:
-    evidence = search(
-        SearchRequest(
-            tenant_id=request.state.tenant_id,
-            kb_id=body.kb_id,
-            query=body.query,
-            top_k=body.top_k,
-            doc_ids=body.doc_ids,
+    source_tenant_id = kb_store.resolve_kb_access_tenant(request.state.tenant_id, body.kb_id)
+    if not source_tenant_id:
+        return {
+            "status": "ok",
+            "kb_id": body.kb_id,
+            "tenant_id": request.state.tenant_id,
+            "source_tenant_id": None,
+            "evidence": [],
+            "trace_id": request.state.trace_id,
+        }
+    try:
+        evidence = search(
+            SearchRequest(
+                tenant_id=source_tenant_id,
+                kb_id=body.kb_id,
+                query=body.query,
+                top_k=body.top_k,
+                doc_ids=body.doc_ids,
+            )
         )
-    )
-    return {"status": "ok", "kb_id": body.kb_id, "evidence": evidence, "trace_id": request.state.trace_id}
+    except Exception as exc:
+        msg = str(exc)
+        if "Missing API key" in msg:
+            raise HTTPException(
+                status_code=503,
+                detail="retrieval unavailable: embedding API key is missing",
+            ) from exc
+        raise HTTPException(status_code=500, detail=f"retrieval failed: {msg}") from exc
+    return {
+        "status": "ok",
+        "kb_id": body.kb_id,
+        "tenant_id": request.state.tenant_id,
+        "source_tenant_id": source_tenant_id,
+        "evidence": evidence,
+        "trace_id": request.state.trace_id,
+    }
 
 
 @app.post("/api/v1/agent/run")
 async def run_agent(body: ApiAgentRunRequest, request: Request) -> Dict:
+    source_tenant_id = kb_store.resolve_kb_access_tenant(request.state.tenant_id, body.kb_id)
+    if not source_tenant_id:
+        raise HTTPException(status_code=404, detail="kb not found or not accessible")
     result = agent_runtime.run(
         AgentRunRequest(
-            tenant_id=request.state.tenant_id,
+            tenant_id=source_tenant_id,
             actor_id=request.state.actor_id,
             trace_id=request.state.trace_id,
             source_service=request.state.source_service,

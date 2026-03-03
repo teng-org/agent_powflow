@@ -3,14 +3,16 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 const config = reactive({
   executionBaseUrl: 'http://localhost:8091',
+  controlPlaneBaseUrl: 'http://127.0.0.1:8099',
   tenantId: 'platform',
   actorId: 'kb-admin',
   sourceService: 'kb-admin-web',
   traceId: '',
 })
 
-const loginForm = reactive({ username: 'admin', password: 'admin123' })
+const loginForm = reactive({ username: 'admin', password: '' })
 const token = ref('')
+const controlPlaneToken = ref('')
 const role = ref('')
 const loginError = ref('')
 const streamConnected = ref(false)
@@ -38,6 +40,7 @@ const ui = reactive({
   showCommitConfirmModal: false,
   showDocDeleteCommitModal: false,
   showDeleteKbConfirmModal: false,
+  showKbAccessModal: false,
   showBatchModal: false,
   showDocTagModal: false,
   showChunkDetailModal: false,
@@ -49,6 +52,19 @@ const ui = reactive({
 const kbForm = reactive({ name: '' })
 const renameKbForm = reactive({ kb_id: '', name: '' })
 const deleteKbForm = reactive({ kb_id: '', name: '' })
+const kbAccessModal = reactive({
+  kb_id: '',
+  kb_name: '',
+  access_mode: '',
+  visibility: 'PRIVATE',
+  bindings: [],
+  target_tenant_id: '',
+  loading: false,
+  saving_visibility: false,
+  binding_busy: false,
+  tenant_options_loading: false,
+  tenant_options: [],
+})
 const uploadChunkConfig = reactive({ chunk_size: 500, chunk_overlap: 50, chunk_method: 'sentence', chunk_delimiter: '\\n\\n' })
 const chunkRunConfig = reactive({ chunk_method: 'sentence', chunk_size: 500, chunk_overlap: 50, chunk_delimiter: '\\n\\n' })
 const uploadProcessMode = ref('UPLOAD_CLEAN_CHUNK_EMBED')
@@ -125,6 +141,7 @@ const isLoggedIn = computed(() => !!token.value)
 const selectedKb = computed(() => kbs.value.find((k) => k.kb_id === selectedKbId.value) || null)
 const selectedDoc = computed(() => docs.value.find((d) => d.doc_id === selectedDocId.value) || null)
 const kbStats = computed(() => selectedKb.value?.stats || {})
+const canManageKbAccess = computed(() => String(kbAccessModal.access_mode || '') === 'OWNER')
 const visibleKbs = computed(() => {
   const keyword = kbSearch.value.trim().toLowerCase()
   const list = kbs.value.filter((kb) => {
@@ -1430,6 +1447,18 @@ async function parseJsonResponse(resp) {
   return { raw: await resp.text() }
 }
 
+function withControlHeaders(extra = {}) {
+  const headers = {
+    Authorization: `Bearer ${controlPlaneToken.value}`,
+    'X-Tenant-Id': config.tenantId,
+    'X-Actor-Id': config.actorId,
+    'X-Source-Service': config.sourceService,
+    ...extra,
+  }
+  if (config.traceId.trim()) headers['X-Trace-Id'] = config.traceId.trim()
+  return headers
+}
+
 function normalizeApiErrorMessage(data, status) {
   const detail = data?.detail ?? data?.error ?? data?.raw
   if (typeof detail === 'string' && detail.trim()) return detail
@@ -1472,6 +1501,26 @@ async function callApi(path, options = {}) {
   return data
 }
 
+async function callControlApi(path, options = {}) {
+  const resp = await fetch(`${config.controlPlaneBaseUrl}${path}`, options)
+  const data = await parseJsonResponse(resp)
+  if (!resp.ok) throw new Error(normalizeApiErrorMessage(data, resp.status))
+  return data
+}
+
+async function ensureControlPlaneToken() {
+  if (controlPlaneToken.value) return
+  const data = await callControlApi('/api/v1/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Source-Service': config.sourceService },
+    body: JSON.stringify({ username: loginForm.username, password: loginForm.password }),
+  })
+  controlPlaneToken.value = String(data.accessToken || data.access_token || '')
+  if (!controlPlaneToken.value) {
+    throw new Error('control-plane 登录失败：未返回 token')
+  }
+}
+
 async function login() {
   loginError.value = ''
   loading.login = true
@@ -1483,6 +1532,8 @@ async function login() {
     })
     token.value = data.access_token
     role.value = data.role || ''
+    controlPlaneToken.value = ''
+    await ensureControlPlaneToken()
     await refreshAll()
     connectTaskStream()
     pushNotice('success', '登录成功')
@@ -1510,6 +1561,7 @@ function logout() {
     kbsRefreshTimer = null
   }
   token.value = ''
+  controlPlaneToken.value = ''
   role.value = ''
   kbs.value = []
   docs.value = []
@@ -1668,6 +1720,143 @@ function requestDeleteKb(kb) {
 
 function toggleKbMenu(kbId) {
   kbMenuOpenId.value = kbMenuOpenId.value === kbId ? '' : kbId
+}
+
+function openKbAccessModal(kb) {
+  kbMenuOpenId.value = ''
+  kbAccessModal.kb_id = String(kb?.kb_id || '')
+  kbAccessModal.kb_name = String(kb?.name || kb?.kb_id || '')
+  kbAccessModal.access_mode = String(kb?.access_mode || '')
+  kbAccessModal.visibility = String(kb?.visibility || 'PRIVATE')
+  kbAccessModal.target_tenant_id = ''
+  kbAccessModal.bindings = []
+  kbAccessModal.tenant_options = []
+  kbAccessModal.tenant_options_loading = false
+  ui.showKbAccessModal = true
+  loadKbBindingsForModal()
+  loadTenantOptionsForModal()
+}
+
+function closeKbAccessModal() {
+  ui.showKbAccessModal = false
+  kbAccessModal.kb_id = ''
+  kbAccessModal.kb_name = ''
+  kbAccessModal.access_mode = ''
+  kbAccessModal.visibility = 'PRIVATE'
+  kbAccessModal.target_tenant_id = ''
+  kbAccessModal.bindings = []
+  kbAccessModal.tenant_options = []
+  kbAccessModal.tenant_options_loading = false
+  kbAccessModal.loading = false
+  kbAccessModal.saving_visibility = false
+  kbAccessModal.binding_busy = false
+}
+
+async function loadTenantOptionsForModal() {
+  kbAccessModal.tenant_options_loading = true
+  try {
+    await ensureControlPlaneToken()
+    const data = await callControlApi('/api/v1/admin/tenants', {
+      headers: withControlHeaders(),
+    })
+    kbAccessModal.tenant_options = Array.isArray(data?.items) ? data.items : []
+  } catch (err) {
+    kbAccessModal.tenant_options = []
+    pushNotice('warn', `租户列表加载失败：${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    kbAccessModal.tenant_options_loading = false
+  }
+}
+
+async function loadKbBindingsForModal() {
+  if (!kbAccessModal.kb_id) return
+  kbAccessModal.loading = true
+  try {
+    const data = await callApi(`/api/v1/admin/kbs/${encodeURIComponent(kbAccessModal.kb_id)}/bindings`, {
+      headers: withHeaders(),
+    })
+    kbAccessModal.bindings = Array.isArray(data?.items) ? data.items : []
+  } catch (err) {
+    pushNotice('error', err instanceof Error ? err.message : String(err))
+  } finally {
+    kbAccessModal.loading = false
+  }
+}
+
+async function saveKbVisibilityFromModal() {
+  if (!kbAccessModal.kb_id) return
+  if (!canManageKbAccess.value) {
+    pushNotice('warn', '仅库所有者可修改可见性')
+    return
+  }
+  kbAccessModal.saving_visibility = true
+  try {
+    await callApi(`/api/v1/admin/kbs/${encodeURIComponent(kbAccessModal.kb_id)}/visibility`, {
+      method: 'PATCH',
+      headers: withHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ visibility: kbAccessModal.visibility }),
+    })
+    await loadKbs()
+    pushNotice('success', '库可见性已更新')
+  } catch (err) {
+    pushNotice('error', err instanceof Error ? err.message : String(err))
+  } finally {
+    kbAccessModal.saving_visibility = false
+  }
+}
+
+async function addKbBindingFromModal() {
+  if (!kbAccessModal.kb_id) return
+  if (!canManageKbAccess.value) {
+    pushNotice('warn', '仅库所有者可管理租户绑定')
+    return
+  }
+  const target = String(kbAccessModal.target_tenant_id || '').trim()
+  if (!target) {
+    pushNotice('warn', '请输入目标租户 ID')
+    return
+  }
+  kbAccessModal.binding_busy = true
+  try {
+    await callApi(`/api/v1/admin/kbs/${encodeURIComponent(kbAccessModal.kb_id)}/bindings`, {
+      method: 'PUT',
+      headers: withHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ target_tenant_id: target }),
+    })
+    kbAccessModal.target_tenant_id = ''
+    await loadKbBindingsForModal()
+    await loadKbs()
+    pushNotice('success', `已绑定租户 ${target}`)
+  } catch (err) {
+    pushNotice('error', err instanceof Error ? err.message : String(err))
+  } finally {
+    kbAccessModal.binding_busy = false
+  }
+}
+
+async function removeKbBindingFromModal(targetTenantId) {
+  if (!kbAccessModal.kb_id || !targetTenantId) return
+  if (!canManageKbAccess.value) {
+    pushNotice('warn', '仅库所有者可管理租户绑定')
+    return
+  }
+  kbAccessModal.binding_busy = true
+  try {
+    await callApi(
+      `/api/v1/admin/kbs/${encodeURIComponent(kbAccessModal.kb_id)}/bindings/${encodeURIComponent(String(targetTenantId))}`,
+      {
+        method: 'DELETE',
+        headers: withHeaders(),
+      },
+    )
+    await loadKbBindingsForModal()
+    await loadKbs()
+    pushNotice('success', `已解除租户 ${targetTenantId} 绑定`)
+  } catch (err) {
+    pushNotice('error', err instanceof Error ? err.message : String(err))
+  } finally {
+    kbAccessModal.binding_busy = false
+  }
 }
 
 async function confirmDeleteKb() {
@@ -2786,6 +2975,9 @@ function addUploadFiles(files) {
               <button class="btn ghost kb-card-menu-item" @click.stop="setKbFrozen(kb, !kb.frozen)">
                 {{ kb.frozen ? '解冻库' : '冻结库' }}
               </button>
+              <button class="btn ghost kb-card-menu-item" @click.stop="openKbAccessModal(kb)">
+                访问设置
+              </button>
               <button
                 class="btn ghost kb-card-menu-item"
                 :disabled="Number(kb.stats?.document_count || 0) <= 0"
@@ -2801,6 +2993,10 @@ function addUploadFiles(files) {
           <div class="tag-row kb-tag-row">
             <span class="badge badge-info">docs {{ kb.stats?.document_count || 0 }}</span>
             <span class="badge badge-info">chunks {{ kb.stats?.total_chunks || 0 }}</span>
+            <span class="badge badge-warning">vis {{ kb.visibility || 'PRIVATE' }}</span>
+            <span class="badge" :class="kb.access_mode === 'OWNER' ? 'badge-success' : 'badge-warn'">
+              {{ kb.access_mode || 'OWNER' }}
+            </span>
           </div>
           <div class="meta kb-stats-line">
             <span>size: {{ formatBytes(kb.stats?.total_size_bytes) }}</span>
@@ -3510,6 +3706,81 @@ function addUploadFiles(files) {
             保存
           </button>
           <button class="btn ghost" @click="ui.showRenameKbModal = false">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="ui.showKbAccessModal" class="modal" @mousedown.self="closeKbAccessModal">
+      <div class="modal-card kb-access-modal" @keydown.enter.prevent>
+        <div class="panel-header">
+          <strong>知识库访问设置</strong>
+        </div>
+        <div class="meta truncated" :title="kbAccessModal.kb_name">
+          {{ kbAccessModal.kb_name }}（{{ kbAccessModal.kb_id }}）
+        </div>
+        <div class="tag-row">
+          <span class="badge badge-info">access {{ kbAccessModal.access_mode || '-' }}</span>
+          <span class="badge badge-warning">vis {{ kbAccessModal.visibility || 'PRIVATE' }}</span>
+        </div>
+        <div class="field">
+          可见性
+          <div class="stack-row">
+            <select v-model="kbAccessModal.visibility" :disabled="!canManageKbAccess || kbAccessModal.saving_visibility">
+              <option value="PRIVATE">PRIVATE</option>
+              <option value="SHARED_ALL">SHARED_ALL</option>
+            </select>
+            <button class="btn ghost" @click="saveKbVisibilityFromModal" :disabled="!canManageKbAccess || kbAccessModal.saving_visibility">
+              {{ kbAccessModal.saving_visibility ? '保存中...' : '保存可见性' }}
+            </button>
+          </div>
+        </div>
+          <div class="field">
+          绑定租户
+          <div class="stack-row">
+            <select
+              v-model="kbAccessModal.target_tenant_id"
+              :disabled="!canManageKbAccess || kbAccessModal.binding_busy || kbAccessModal.tenant_options_loading"
+            >
+              <option value="">{{ kbAccessModal.tenant_options_loading ? '租户加载中...' : '选择目标租户' }}</option>
+              <option
+                v-for="t in kbAccessModal.tenant_options"
+                :key="t.tenantId"
+                :value="t.tenantId"
+              >
+                {{ t.name }} ({{ t.tenantCode }})
+              </option>
+            </select>
+            <button class="btn ghost" @click="addKbBindingFromModal" :disabled="!canManageKbAccess || kbAccessModal.binding_busy">
+              添加绑定
+            </button>
+          </div>
+          <div v-if="!kbAccessModal.tenant_options_loading && !(kbAccessModal.tenant_options || []).length" class="meta">
+            未获取到租户列表
+          </div>
+          <div class="meta" v-if="!canManageKbAccess">当前库非 OWNER，仅可查看</div>
+        </div>
+        <div class="field">
+          绑定列表
+          <div class="kb-binding-list">
+            <div v-if="kbAccessModal.loading" class="meta">加载中...</div>
+            <div v-else-if="!(kbAccessModal.bindings || []).length" class="meta">暂无绑定租户</div>
+            <div v-for="item in kbAccessModal.bindings" :key="`${item.owner_tenant_id}-${item.kb_id}-${item.target_tenant_id}`" class="kb-binding-item">
+              <div class="kb-binding-main">
+                <strong>{{ item.target_tenant_id }}</strong>
+                <span class="meta">by {{ item.created_by || '-' }}</span>
+              </div>
+              <button
+                class="btn ghost btn-danger"
+                :disabled="!canManageKbAccess || kbAccessModal.binding_busy"
+                @click="removeKbBindingFromModal(item.target_tenant_id)"
+              >
+                解除
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="stack-row actions-right">
+          <button class="btn ghost" @click="closeKbAccessModal">关闭</button>
         </div>
       </div>
     </div>

@@ -6,8 +6,8 @@ const cfg = reactive({
   controlPlaneBaseUrl: 'http://127.0.0.1:8099',
   chatBaseUrl: 'http://localhost:8092',
   executionBaseUrl: 'http://localhost:8091',
-  executionToken: '',
   chatToken: '',
+  tenantCode: 'platform',
   tenantId: 'platform',
   actorId: 'chat-user',
   sourceService: 'web-app',
@@ -36,6 +36,7 @@ const ui = reactive({
   sourceOpen: {},
   eventOpen: {},
   stageOpen: {},
+  draftSessionTitle: '',
 })
 
 const chat = reactive({
@@ -55,6 +56,7 @@ const chat = reactive({
   kbList: [],
   sessions: [],
   retrievalSources: [],
+  sessionRetrievalSources: [],
   stageState: [],
   debugEvents: [],
 })
@@ -77,6 +79,17 @@ const messagesRef = ref(null)
 
 const canSend = computed(() => !chat.running && input.value.trim().length > 0)
 const activeSession = computed(() => chat.sessions.find((s) => s.session_id === ui.selectedSessionId) || null)
+const displaySessions = computed(() => {
+  const items = Array.isArray(chat.sessions) ? [...chat.sessions] : []
+  if (ui.draftSessionTitle) {
+    return [{ session_id: '__draft__', title: ui.draftSessionTitle, draft: true }, ...items]
+  }
+  return items
+})
+const canEditPrompt = computed(() => {
+  const roles = Array.isArray(account.roles) ? account.roles.map((x) => String(x)) : []
+  return roles.includes('PLATFORM_ADMIN') || roles.includes('TENANT_ADMIN')
+})
 
 marked.setOptions({
   gfm: true,
@@ -124,13 +137,6 @@ function authHeaders(extra = {}) {
   }
 }
 
-function executionHeaders(extra = {}) {
-  return authHeaders({
-    ...(cfg.executionToken ? { Authorization: `Bearer ${cfg.executionToken}` } : {}),
-    ...extra,
-  })
-}
-
 function chatHeaders(extra = {}) {
   return {
     'X-Source-Service': cfg.sourceService,
@@ -173,7 +179,7 @@ function syncIdentityFromToken(token) {
 function resolveTenantCode() {
   const q = new URLSearchParams(window.location.search).get('tenant')
   if (q && q.trim()) return q.trim()
-  return String(cfg.tenantId || 'platform').trim() || 'platform'
+  return String(cfg.tenantCode || 'platform').trim() || 'platform'
 }
 
 function accountRoleText() {
@@ -270,7 +276,7 @@ function stageDetailText(info) {
   if (!info || typeof info !== 'object') return ''
   const lines = []
   for (const [k, v] of Object.entries(info)) {
-    if (k === 'preview' && Array.isArray(v)) continue
+    if ((k === 'preview' || k === 'session_recall_breakdown' || k === 'keyword_context_preview') && Array.isArray(v)) continue
     lines.push(`${k}: ${prettyValue(v)}`)
   }
   if (Array.isArray(info.preview) && info.preview.length) {
@@ -280,6 +286,30 @@ function stageDetailText(info) {
       const score = typeof p?.score === 'number' ? p.score.toFixed(3) : '-'
       const text = String(p?.text_preview || '').replace(/\s+/g, ' ').trim()
       lines.push(`#${i + 1} doc=${p?.doc_id || '-'} chunk=${p?.chunk_id || '-'} score=${score}`)
+      if (text) lines.push(`  ${text}`)
+    })
+  }
+  if (Array.isArray(info.session_recall_breakdown) && info.session_recall_breakdown.length) {
+    lines.push('')
+    lines.push(`session_recall_breakdown(${info.session_recall_breakdown.length}):`)
+    info.session_recall_breakdown.forEach((p, i) => {
+      const fusion = typeof p?.fusion_score === 'number' ? p.fusion_score.toFixed(4) : '-'
+      const k = typeof p?.keyword_norm === 'number' ? p.keyword_norm.toFixed(3) : '-'
+      const v = typeof p?.vector_norm === 'number' ? p.vector_norm.toFixed(3) : '-'
+      const r = typeof p?.recency_norm === 'number' ? p.recency_norm.toFixed(3) : '-'
+      const text = String(p?.text_preview || '').replace(/\s+/g, ' ').trim()
+      lines.push(`#${i + 1} seg=${p?.segment_id || '-'} src=${p?.source || '-'} fusion=${fusion} (k=${k}, v=${v}, r=${r})`)
+      if (text) lines.push(`  ${text}`)
+    })
+  }
+  if (Array.isArray(info.keyword_context_preview) && info.keyword_context_preview.length) {
+    lines.push('')
+    lines.push(`keyword_context_preview(${info.keyword_context_preview.length}):`)
+    info.keyword_context_preview.forEach((p, i) => {
+      const score = typeof p?.score === 'number' ? p.score.toFixed(3) : '-'
+      const overlap = typeof p?.keyword_overlap_count === 'number' ? p.keyword_overlap_count : '-'
+      const text = String(p?.text_preview || '').replace(/\s+/g, ' ').trim()
+      lines.push(`#${i + 1} seg=${p?.segment_id || '-'} score=${score} overlap=${overlap}`)
       if (text) lines.push(`  ${text}`)
     })
   }
@@ -296,20 +326,6 @@ async function fetchJson(baseUrl, path, options = {}) {
   return response.json()
 }
 
-async function ensureExecutionLogin() {
-  if (cfg.executionToken) return
-  const data = await fetchJson(cfg.executionBaseUrl, '/api/v1/admin/auth/login', {
-    method: 'POST',
-    headers: authHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ username: cfg.adminUsername, password: cfg.adminPassword }),
-  })
-  cfg.executionToken = String(data.access_token || data.token || '')
-  if (!cfg.executionToken) throw new Error('execution admin login failed: empty token')
-  if (!isLikelySignedToken(cfg.chatToken)) {
-    cfg.chatToken = cfg.executionToken
-  }
-}
-
 function hydrateFromStorage() {
   try {
     const raw = localStorage.getItem('apf_webapp_auth')
@@ -319,12 +335,18 @@ function hydrateFromStorage() {
     if (data.controlPlaneBaseUrl) cfg.controlPlaneBaseUrl = String(data.controlPlaneBaseUrl)
     if (data.chatBaseUrl) cfg.chatBaseUrl = String(data.chatBaseUrl)
     if (data.chatToken && isLikelySignedToken(data.chatToken)) cfg.chatToken = String(data.chatToken)
+    if (data.tenantCode) cfg.tenantCode = String(data.tenantCode)
     if (data.tenantId) cfg.tenantId = String(data.tenantId)
     if (data.actorId) cfg.actorId = String(data.actorId)
     if (data.topK) chat.topK = Number(data.topK)
     if (data.rankMethod) chat.rankMethod = String(data.rankMethod)
     if (data.authMode && ['login', 'register'].includes(String(data.authMode))) {
       auth.mode = String(data.authMode)
+    }
+    if (!data.tenantCode) {
+      const maybeTenantId = String(data.tenantId || '').trim()
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(maybeTenantId)
+      if (isUuid) cfg.tenantCode = 'platform'
     }
   } catch {
     // noop
@@ -340,6 +362,7 @@ function persistToStorage() {
       controlPlaneBaseUrl: cfg.controlPlaneBaseUrl,
       chatBaseUrl: cfg.chatBaseUrl,
       chatToken: cfg.chatToken,
+      tenantCode: cfg.tenantCode,
       tenantId: cfg.tenantId,
       actorId: cfg.actorId,
       topK: chat.topK,
@@ -352,11 +375,14 @@ function persistToStorage() {
 async function refreshKbList() {
   chat.loadingKb = true
   try {
-    await ensureExecutionLogin()
-    const data = await fetchJson(cfg.executionBaseUrl, '/api/v1/admin/kbs', { headers: executionHeaders() })
-    chat.kbList = data.items || []
+    const data = await fetchJson(cfg.chatBaseUrl, '/api/v1/chat/kbs', { headers: chatHeaders() })
+    const items = Array.isArray(data.items) ? data.items : []
+    chat.kbList = items
     if (!chat.mountedKbId && chat.kbList.length) chat.mountedKbId = chat.kbList[0].kb_id
-    pushDebug('db', 'KB 数据库访问', `已载入 ${chat.kbList.length} 个知识库。`, { kb_count: chat.kbList.length })
+    pushDebug('db', 'KB 数据库访问', `已载入 ${chat.kbList.length} 个知识库。`, {
+      kb_count: chat.kbList.length,
+      tenant_id: cfg.tenantId,
+    })
   } catch (err) {
     chat.statusText = err instanceof Error ? err.message : String(err)
     pushDebug('error', 'KB 读取失败', chat.statusText)
@@ -368,7 +394,7 @@ async function refreshKbList() {
 async function loadChatConfig() {
   chat.loadingConfig = true
   try {
-    const data = await fetchJson(cfg.chatBaseUrl, '/api/v1/admin/chat/config', { headers: chatHeaders() })
+    const data = await fetchJson(cfg.chatBaseUrl, '/api/v1/chat/config', { headers: chatHeaders() })
     const item = data.item || {}
     chat.topK = Number(item.chat_default_top_k || 6)
     chat.rankMethod = String(item.chat_default_rank_method || 'vector')
@@ -380,8 +406,13 @@ async function loadChatConfig() {
       prompt_chars: chat.promptPreview.length,
     })
   } catch (err) {
+    // 用户态不强依赖配置接口，失败时回退默认值避免阻断登录链路
+    chat.topK = Number(chat.topK || 6) || 6
+    chat.rankMethod = String(chat.rankMethod || 'vector') || 'vector'
+    chat.promptPreview = ''
+    chat.promptDraft = ''
     chat.statusText = err instanceof Error ? err.message : String(err)
-    pushDebug('error', '配置读取失败', chat.statusText)
+    pushDebug('warn', '配置读取降级', chat.statusText)
   } finally {
     chat.loadingConfig = false
   }
@@ -389,6 +420,10 @@ async function loadChatConfig() {
 
 async function saveChatPrompt() {
   try {
+    if (!canEditPrompt.value) {
+      pushDebug('warn', '保存 Prompt 已拦截', '当前用户无管理员权限，不能修改系统 Prompt。')
+      return
+    }
     const prompt = String(chat.promptDraft || '').trim()
     if (!prompt) throw new Error('Prompt 不能为空')
     await fetchJson(cfg.chatBaseUrl, '/api/v1/admin/chat/config', {
@@ -410,6 +445,12 @@ async function loadSessions() {
   try {
     const data = await fetchJson(cfg.chatBaseUrl, '/api/v1/chat/sessions?limit=100', { headers: chatHeaders() })
     chat.sessions = data.items || []
+    if (ui.selectedSessionId && !chat.sessions.find((s) => s.session_id === ui.selectedSessionId)) {
+      ui.selectedSessionId = ''
+    }
+    if (!ui.selectedSessionId && messages.value.length === 0 && !ui.draftSessionTitle) {
+      ui.draftSessionTitle = '新对话'
+    }
   } catch (err) {
     pushDebug('error', '会话列表读取失败', err instanceof Error ? err.message : String(err))
   } finally {
@@ -418,7 +459,7 @@ async function loadSessions() {
 }
 
 async function createSession() {
-  const title = chat.mountedKbId ? `Chat-${chat.mountedKbId}` : `Chat-${Date.now()}`
+  const title = String(ui.draftSessionTitle || '新对话')
   const data = await fetchJson(cfg.chatBaseUrl, '/api/v1/chat/sessions', {
     method: 'POST',
     headers: chatHeaders({ 'Content-Type': 'application/json' }),
@@ -427,6 +468,7 @@ async function createSession() {
   const sessionId = data.item?.session_id || ''
   if (!sessionId) throw new Error('session_id empty')
   ui.selectedSessionId = sessionId
+  ui.draftSessionTitle = ''
   await loadSessions()
   return sessionId
 }
@@ -467,6 +509,11 @@ async function deleteSession(session) {
 }
 
 async function selectSession(sessionId) {
+  if (sessionId === '__draft__') {
+    ui.selectedSessionId = ''
+    return
+  }
+  ui.draftSessionTitle = ''
   ui.selectedSessionId = sessionId
   const data = await fetchJson(cfg.chatBaseUrl, `/api/v1/chat/sessions/${sessionId}/messages?limit=200`, {
     headers: chatHeaders(),
@@ -483,6 +530,7 @@ async function selectSession(sessionId) {
 
 function resetRunState() {
   chat.retrievalSources = []
+  chat.sessionRetrievalSources = []
   chat.stageState = []
   chat.runId = ''
   ui.sourceOpen = {}
@@ -513,10 +561,15 @@ function onTrace(data) {
     ...(data && typeof data === 'object' ? data : {}),
     ...(data.info && typeof data.info === 'object' ? data.info : {}),
     ...(Array.isArray(data.retrieval_preview) ? { retrieval_preview_count: data.retrieval_preview.length } : {}),
+    ...(Array.isArray(data.session_retrieval_preview) ? { session_retrieval_preview_count: data.session_retrieval_preview.length } : {}),
+    ...(Array.isArray(data.keyword_context_preview) ? { keyword_context_preview_count: data.keyword_context_preview.length } : {}),
   }
   pushDebug('trace', title, detail, payload)
   if (Array.isArray(data.retrieval_preview) && data.retrieval_preview.length) {
     chat.retrievalSources = data.retrieval_preview
+  }
+  if (Array.isArray(data.session_retrieval_preview) && data.session_retrieval_preview.length) {
+    chat.sessionRetrievalSources = data.session_retrieval_preview
   }
 }
 
@@ -666,7 +719,33 @@ async function sendMessage() {
           if (data.response) assistant.content = data.response
           ensureAssistantHtml(assistant)
           chat.statusText = 'Completed'
+          if (data.session_title_updated && ui.selectedSessionId) {
+            const idx = chat.sessions.findIndex((s) => s.session_id === ui.selectedSessionId)
+            if (idx >= 0) {
+              chat.sessions[idx] = {
+                ...chat.sessions[idx],
+                title: data.session_title || chat.sessions[idx].title,
+              }
+            }
+          }
           pushDebug('api', '对话完成', '本轮对话已完成并落库。', { response_chars: assistant.content.length })
+        } else if (eventName === 'session_title') {
+          const sid = String(data.session_id || ui.selectedSessionId || '')
+          const title = String(data.session_title || '').trim()
+          if (sid && title) {
+            const idx = chat.sessions.findIndex((s) => s.session_id === sid)
+            if (idx >= 0) {
+              chat.sessions[idx] = { ...chat.sessions[idx], title }
+            }
+          }
+          pushDebug('trace', '会话标题更新', `title=${title || '-'}, stable=${Boolean(data.session_title_stable)}`, {
+            session_id: sid || '-',
+            session_title: title,
+            stable: Boolean(data.session_title_stable),
+            updated: Boolean(data.session_title_updated),
+            attempt_count: Number(data.attempt_count || 0),
+            max_attempts: Number(data.max_attempts || 0),
+          })
         } else if (eventName === 'error') {
           if (flushTimer) {
             clearTimeout(flushTimer)
@@ -749,10 +828,6 @@ async function cancelRun() {
 }
 
 async function adminLogin() {
-  await ensureExecutionLogin()
-  if (!isLikelySignedToken(cfg.chatToken)) {
-    cfg.chatToken = cfg.executionToken
-  }
   if (!isLikelySignedToken(cfg.chatToken)) throw new Error('valid chat token is required')
   await Promise.all([refreshKbList(), loadChatConfig(), loadSessions()])
 }
@@ -773,11 +848,12 @@ async function userLogin() {
   })
   cfg.chatToken = String(data.accessToken || '')
   if (!isLikelySignedToken(cfg.chatToken)) throw new Error('登录成功但 token 为空')
+  cfg.tenantCode = tenantCode
   syncIdentityFromToken(cfg.chatToken)
   if (data.tenantId) cfg.tenantId = String(data.tenantId)
   if (data.actorId) cfg.actorId = String(data.actorId)
   await loadMe()
-  await loadSessions()
+  await Promise.all([loadSessions(), refreshKbList(), loadChatConfig()])
 }
 
 async function userRegister() {
@@ -863,7 +939,6 @@ async function login() {
 
 function logout() {
   auth.loggedIn = false
-  cfg.executionToken = ''
   cfg.chatToken = ''
   ui.selectedSessionId = ''
   ui.accountOpen = false
@@ -883,6 +958,7 @@ function logout() {
 
 function startNewChat() {
   ui.selectedSessionId = ''
+  ui.draftSessionTitle = '新对话'
   messages.value = []
   resetRunState()
   chat.statusText = 'New chat'
@@ -903,6 +979,12 @@ function toggleStage(id) {
 function sourceTitle(item, idx) {
   const score = typeof item.score === 'number' ? item.score.toFixed(3) : '-'
   return `#${idx + 1} 文档:${item.doc_id || '-'} / Chunk:${item.chunk_id || '-'} / 分数:${score}`
+}
+
+function sessionSourceTitle(item, idx) {
+  const score = typeof item.score === 'number' ? item.score.toFixed(3) : '-'
+  const source = String(item.source || '-')
+  return `#${idx + 1} seg:${item.segment_id || '-'} / session:${item.session_id || '-'} / ${source} / 分数:${score}`
 }
 
 onMounted(() => {
@@ -926,11 +1008,16 @@ onMounted(() => {
       <div class="session-wrap" v-if="!ui.sidebarCollapsed">
         <div class="section-title">Conversations</div>
         <div class="session-list">
-          <div v-for="s in chat.sessions" :key="s.session_id" class="session-item" :class="{ active: s.session_id === ui.selectedSessionId }">
-            <button class="session-main" @click="selectSession(s.session_id)" :title="s.title">{{ s.title || s.session_id }}</button>
+          <div
+            v-for="s in displaySessions"
+            :key="s.session_id"
+            class="session-item"
+            :class="{ active: s.session_id === ui.selectedSessionId || (s.session_id === '__draft__' && !ui.selectedSessionId) }"
+          >
+            <button class="session-main" @click="selectSession(s.session_id)" :title="s.title">{{ s.title || '新对话' }}</button>
             <div class="session-tools">
-              <button class="tool-btn" @click="renameSession(s)" title="重命名">✎</button>
-              <button class="tool-btn" @click="deleteSession(s)" title="删除">×</button>
+              <button v-if="s.session_id !== '__draft__'" class="tool-btn" @click="renameSession(s)" title="重命名">✎</button>
+              <button v-if="s.session_id !== '__draft__'" class="tool-btn" @click="deleteSession(s)" title="删除">×</button>
             </div>
           </div>
         </div>
@@ -962,7 +1049,7 @@ onMounted(() => {
     <main class="chat-main">
       <header class="topbar">
         <div>
-          <div class="topbar-title">{{ activeSession?.title || 'New Session' }}</div>
+          <div class="topbar-title">{{ activeSession?.title || ui.draftSessionTitle || '新对话' }}</div>
           <div class="topbar-sub">{{ chat.statusText }}</div>
         </div>
         <div class="topbar-meta">
@@ -1028,10 +1115,10 @@ onMounted(() => {
           </label>
         </div>
         <label class="toggle-line"><input type="checkbox" v-model="chat.useKb" /> 启用知识库检索</label>
-        <label>对话系统 Prompt<textarea v-model="chat.promptDraft" rows="6" /></label>
+        <label>对话系统 Prompt<textarea v-model="chat.promptDraft" rows="6" :readonly="!canEditPrompt" /></label>
         <div class="inline-actions">
           <button class="btn ghost" @click="loadChatConfig" :disabled="chat.loadingConfig">刷新配置</button>
-          <button class="btn ghost" @click="saveChatPrompt">保存 Prompt</button>
+          <button class="btn ghost" @click="saveChatPrompt" :disabled="!canEditPrompt" :title="canEditPrompt ? '' : '仅管理员可修改 Prompt'">保存 Prompt</button>
           <button class="btn ghost" @click="refreshKbList" :disabled="chat.loadingKb">刷新 KB</button>
         </div>
       </section>
@@ -1048,6 +1135,24 @@ onMounted(() => {
             <div class="source-row"><strong>tenant</strong> {{ s.tenant_id || '-' }}</div>
             <div class="source-row"><strong>kb</strong> {{ s.kb_id || '-' }}</div>
             <div class="source-row"><strong>text</strong></div>
+            <pre>{{ s.text_preview || '' }}</pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="debug-section">
+        <div class="section-title">会话记忆召回来源</div>
+        <div v-if="!chat.sessionRetrievalSources.length" class="placeholder">当前运行暂无会话召回来源。</div>
+        <div v-for="(s, idx) in chat.sessionRetrievalSources" :key="`${s.segment_id}-${idx}`" class="source-item">
+          <button class="source-head" @click="toggleSource(`srag-${idx}`)">
+            <span>{{ sessionSourceTitle(s, idx) }}</span>
+            <span>{{ ui.sourceOpen[`srag-${idx}`] ? '▴' : '▾' }}</span>
+          </button>
+          <div class="source-body" v-if="ui.sourceOpen[`srag-${idx}`]">
+            <div class="source-row"><strong>segment_id</strong> {{ s.segment_id || '-' }}</div>
+            <div class="source-row"><strong>session_id</strong> {{ s.session_id || '-' }}</div>
+            <div class="source-row"><strong>score</strong> {{ s.score ?? '-' }}</div>
+            <div class="source-row"><strong>preview</strong></div>
             <pre>{{ s.text_preview || '' }}</pre>
           </div>
         </div>

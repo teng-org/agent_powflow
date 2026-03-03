@@ -10,10 +10,10 @@ const globalConfig = reactive({
   actorId: 'debug-user',
   sourceService: 'debug-web',
   traceId: '',
-  adminToken: 'dev-admin-token',
+  adminToken: '',
   controlPlaneToken: '',
   adminUsername: 'admin',
-  adminPassword: 'admin123',
+  adminPassword: '',
 })
 
 const auth = reactive({
@@ -153,6 +153,7 @@ const dbviz = reactive({
   statusTasks: null,
   statusTaskItems: [],
   statusKbs: 0,
+  chatStoreStatus: null,
   statusLastUpdated: '',
   statusAutoRefresh: true,
   statusRefreshSeconds: 5,
@@ -165,6 +166,38 @@ const pgTotalPages = computed(() => Math.max(1, Math.ceil((dbviz.pgTotal || 0) /
 const cpTotalPages = computed(() => Math.max(1, Math.ceil((dbviz.cpTotal || 0) / (dbviz.cpPageSize || 1))))
 const mongoTotalPages = computed(() => Math.max(1, Math.ceil((dbviz.mongoTotal || 0) / (dbviz.mongoPageSize || 1))))
 const usageTotalPages = computed(() => Math.max(1, Math.ceil((dbviz.usageTotal || 0) / (dbviz.usagePageSize || 1))))
+
+function runtimeConfigGroupOf(key) {
+  const k = String(key || '')
+  if (k.startsWith('execution_') || k.startsWith('global_kb_')) return 'Execution'
+  if (k.startsWith('embedding_')) return 'Embedding'
+  if (k.startsWith('summary_')) return 'Summary'
+  if (k.startsWith('chat_')) return 'Chat'
+  if (k.startsWith('memory_')) return 'Memory'
+  if (k.startsWith('api_slot_') || k.startsWith('api_model_')) return 'API Slot/Pricing'
+  return 'Other'
+}
+
+const runtimeConfigGroupedKeys = computed(() => {
+  const preferredOrder = [
+    'Execution',
+    'Embedding',
+    'Summary',
+    'Chat',
+    'Memory',
+    'API Slot/Pricing',
+    'Other',
+  ]
+  const groups = {}
+  for (const key of dbviz.runtimeConfigKeys || []) {
+    const g = runtimeConfigGroupOf(key)
+    if (!groups[g]) groups[g] = []
+    groups[g].push(key)
+  }
+  return preferredOrder
+    .filter((name) => Array.isArray(groups[name]) && groups[name].length > 0)
+    .map((name) => ({ name, keys: groups[name] }))
+})
 
 function formatCny(value, digits = 4) {
   const n = Number(value || 0)
@@ -617,7 +650,7 @@ async function loadStatus() {
     }
   }
 
-  const [kbsCheck, tasksCheck, apiPoolCheck, auxApiPoolCheck, usageCheck, chatPlaneCheck] = await Promise.all([
+  const [kbsCheck, tasksCheck, apiPoolCheck, auxApiPoolCheck, usageCheck, chatPlaneCheck, chatStoreCheck] = await Promise.all([
     timed('知识库列表', () => fetchJson('/api/v1/admin/kbs')),
     timed('任务系统', () => fetchJson('/api/v1/admin/tasks', { limit: 200 })),
     timed('主 API 池', () => fetchJson('/api/v1/admin/api-pool')),
@@ -633,10 +666,17 @@ async function loadStatus() {
       if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText} (/api/v1/system/health@chat)`)
       return resp.json()
     }),
+    timed('Chat Store 状态', async () => {
+      const base = globalConfig.chatBaseUrl.trim().replace(/\/$/, '')
+      const resp = await fetch(`${base}/api/v1/admin/chat/store/status`, { headers: dbvizHeaders() })
+      if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText} (/api/v1/admin/chat/store/status)`)
+      return resp.json()
+    }),
   ])
 
-  const checks = [kbsCheck, tasksCheck, apiPoolCheck, auxApiPoolCheck, usageCheck, chatPlaneCheck]
+  const checks = [kbsCheck, tasksCheck, apiPoolCheck, auxApiPoolCheck, usageCheck, chatPlaneCheck, chatStoreCheck]
   dbviz.statusChecks = checks
+  dbviz.chatStoreStatus = chatStoreCheck?.data?.item || null
 
   const kbsItems = kbsCheck?.data?.items || []
   dbviz.statusKbs = kbsItems.length
@@ -669,6 +709,18 @@ async function loadStatus() {
   dbviz.runtimeConfigDraft = { ...cfg }
   dbviz.runtimeConfigKeys = runtimeResp?.allowed_keys || Object.keys(cfg)
   dbviz.runtimeConfigDirty = false
+}
+
+async function flushChatStore() {
+  const base = globalConfig.chatBaseUrl.trim().replace(/\/$/, '')
+  const response = await fetch(`${base}/api/v1/admin/chat/store/flush`, {
+    method: 'POST',
+    headers: dbvizHeaders(),
+  })
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText} (/api/v1/admin/chat/store/flush)`)
+  }
+  await loadStatus()
 }
 
 let statusTimer = null
@@ -1071,6 +1123,18 @@ onBeforeUnmount(() => clearStatusTimer())
             <strong>失败/取消中/已取消</strong>
             <span>{{ (dbviz.statusTasks?.failed || 0) + (dbviz.statusTasks?.cancelling || 0) + (dbviz.statusTasks?.cancelled || 0) }}</span>
           </div>
+          <div class="dbviz-card">
+            <strong>Chat Store 后端</strong>
+            <span>{{ dbviz.chatStoreStatus?.persist_backend || '-' }}</span>
+          </div>
+          <div class="dbviz-card">
+            <strong>Chat Store 脏标记</strong>
+            <span>{{ dbviz.chatStoreStatus?.disk_dirty ? 'DIRTY' : 'CLEAN' }}</span>
+          </div>
+          <div class="dbviz-card">
+            <strong>Chat Store 写入</strong>
+            <span>disk {{ dbviz.chatStoreStatus?.disk_write_count || 0 }} / pg {{ dbviz.chatStoreStatus?.pg_write_count || 0 }}</span>
+          </div>
         </div>
 
         <div class="actions" style="margin: 10px 0 6px;">
@@ -1110,6 +1174,39 @@ onBeforeUnmount(() => clearStatusTimer())
         </div>
 
         <div class="panel-sub">
+          <div class="endpoint-head">
+            <h3>Chat Store 持久化状态</h3>
+            <div class="actions">
+              <button class="ghost" @click="loadStatus">刷新</button>
+              <button class="primary" @click="flushChatStore">强制 Flush</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="db-table">
+              <thead>
+                <tr>
+                  <th>字段</th>
+                  <th>值</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(value, key) in (dbviz.chatStoreStatus || {})" :key="`chat-store-${key}`">
+                  <td class="mono">{{ key }}</td>
+                  <td class="mono">
+                    <span class="cell-ellipsis" :title="typeof value === 'object' ? JSON.stringify(value) : String(value)">
+                      {{ typeof value === 'object' ? JSON.stringify(value) : value }}
+                    </span>
+                  </td>
+                </tr>
+                <tr v-if="!dbviz.chatStoreStatus">
+                  <td colspan="2" class="mono">无数据</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel-sub">
           <h3>运行中任务明细（最多 20 条）</h3>
           <div class="table-wrap">
             <table class="db-table">
@@ -1144,6 +1241,16 @@ onBeforeUnmount(() => clearStatusTimer())
           <div class="endpoint-head">
             <h3>可配置参数可视化（runtime-config）</h3>
             <div class="actions">
+              <span
+                v-for="group in runtimeConfigGroupedKeys"
+                :key="`cfg-badge-${group.name}`"
+                class="badge"
+                style="margin-right:6px;"
+              >
+                {{ group.name }} · {{ group.keys.length }}
+              </span>
+            </div>
+            <div class="actions">
               <button class="ghost" @click="dbviz.runtimeConfigDraft = { ...dbviz.runtimeConfig }; dbviz.runtimeConfigDirty = false">重置</button>
               <button class="primary" :disabled="!dbviz.runtimeConfigDirty" @click="saveRuntimeConfig">保存参数</button>
             </div>
@@ -1152,42 +1259,49 @@ onBeforeUnmount(() => clearStatusTimer())
             <table class="db-table">
               <thead>
                 <tr>
+                  <th>分组</th>
                   <th>参数名</th>
                   <th>当前值</th>
                   <th>编辑值</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="key in dbviz.runtimeConfigKeys" :key="`cfg-${key}`">
-                  <td class="mono">{{ key }}</td>
-                  <td class="mono">
-                    <span class="cell-ellipsis" :title="String(dbviz.runtimeConfig[key] ?? '')">{{ dbviz.runtimeConfig[key] }}</span>
-                  </td>
-                  <td class="mono">
-                    <template v-if="typeof dbviz.runtimeConfig[key] === 'boolean'">
-                      <select
-                        :value="String(dbviz.runtimeConfigDraft[key])"
-                        @change="updateRuntimeConfigField(key, $event.target.value, dbviz.runtimeConfig[key])"
-                      >
-                        <option value="true">true</option>
-                        <option value="false">false</option>
-                      </select>
-                    </template>
-                    <template v-else-if="typeof dbviz.runtimeConfig[key] === 'number'">
-                      <input
-                        type="number"
-                        :value="dbviz.runtimeConfigDraft[key]"
-                        @input="updateRuntimeConfigField(key, $event.target.value, dbviz.runtimeConfig[key])"
-                      />
-                    </template>
-                    <template v-else>
-                      <input
-                        :value="dbviz.runtimeConfigDraft[key]"
-                        @input="updateRuntimeConfigField(key, $event.target.value, dbviz.runtimeConfig[key])"
-                      />
-                    </template>
-                  </td>
-                </tr>
+                <template v-for="group in runtimeConfigGroupedKeys" :key="`cfg-group-${group.name}`">
+                  <tr class="group-row">
+                    <td colspan="4"><strong>{{ group.name }}</strong></td>
+                  </tr>
+                  <tr v-for="key in group.keys" :key="`cfg-${group.name}-${key}`">
+                    <td class="mono">{{ group.name }}</td>
+                    <td class="mono">{{ key }}</td>
+                    <td class="mono">
+                      <span class="cell-ellipsis" :title="String(dbviz.runtimeConfig[key] ?? '')">{{ dbviz.runtimeConfig[key] }}</span>
+                    </td>
+                    <td class="mono">
+                      <template v-if="typeof dbviz.runtimeConfig[key] === 'boolean'">
+                        <select
+                          :value="String(dbviz.runtimeConfigDraft[key])"
+                          @change="updateRuntimeConfigField(key, $event.target.value, dbviz.runtimeConfig[key])"
+                        >
+                          <option value="true">true</option>
+                          <option value="false">false</option>
+                        </select>
+                      </template>
+                      <template v-else-if="typeof dbviz.runtimeConfig[key] === 'number'">
+                        <input
+                          type="number"
+                          :value="dbviz.runtimeConfigDraft[key]"
+                          @input="updateRuntimeConfigField(key, $event.target.value, dbviz.runtimeConfig[key])"
+                        />
+                      </template>
+                      <template v-else>
+                        <input
+                          :value="dbviz.runtimeConfigDraft[key]"
+                          @input="updateRuntimeConfigField(key, $event.target.value, dbviz.runtimeConfig[key])"
+                        />
+                      </template>
+                    </td>
+                  </tr>
+                </template>
               </tbody>
             </table>
           </div>

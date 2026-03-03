@@ -68,6 +68,7 @@ class KnowledgeBaseStore:
             cur.execute(
                 """CREATE TABLE IF NOT EXISTS knowledge_bases (
                 tenant_id TEXT NOT NULL, kb_id TEXT NOT NULL, name TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'PRIVATE',
                 summary TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'ACTIVE',
                 frozen BOOLEAN NOT NULL DEFAULT FALSE,
                 summary_embedding_json JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -78,10 +79,30 @@ class KnowledgeBaseStore:
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (tenant_id, kb_id))"""
             )
+            cur.execute("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'PRIVATE'")
+            cur.execute(
+                """
+                UPDATE knowledge_bases
+                SET visibility='SHARED_ALL'
+                WHERE tenant_id='platform'
+                  AND (visibility IS NULL OR visibility='PRIVATE' OR visibility='')
+                """
+            )
             cur.execute("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS frozen BOOLEAN NOT NULL DEFAULT FALSE")
             cur.execute("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS summary_embedding_json JSONB NOT NULL DEFAULT '[]'::jsonb")
             cur.execute("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS summary_dirty BOOLEAN NOT NULL DEFAULT TRUE")
             cur.execute("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS summary_updated_at TIMESTAMPTZ NULL")
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS kb_tenant_bindings (
+                owner_tenant_id TEXT NOT NULL,
+                kb_id TEXT NOT NULL,
+                target_tenant_id TEXT NOT NULL,
+                created_by TEXT NOT NULL DEFAULT 'system',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (owner_tenant_id, kb_id, target_tenant_id))"""
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_kb_tenant_bindings_target ON kb_tenant_bindings (target_tenant_id, updated_at DESC)")
             cur.execute(
                 """CREATE TABLE IF NOT EXISTS documents (
                 tenant_id TEXT NOT NULL, kb_id TEXT NOT NULL, doc_id TEXT NOT NULL,
@@ -858,19 +879,20 @@ class KnowledgeBaseStore:
 
     def ensure_kb(self, tenant_id: str, kb_id: str, name: str | None = None) -> None:
         self._ensure_indexes()
+        default_visibility = "SHARED_ALL" if str(tenant_id or "").strip() == "platform" else "PRIVATE"
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO knowledge_bases (tenant_id, kb_id, name, summary, status, stats, created_at, updated_at)
-                VALUES (%s, %s, %s, '', 'ACTIVE', '{}'::jsonb, NOW(), NOW())
+                """INSERT INTO knowledge_bases (tenant_id, kb_id, name, visibility, summary, status, stats, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, '', 'ACTIVE', '{}'::jsonb, NOW(), NOW())
                 ON CONFLICT (tenant_id, kb_id) DO NOTHING""",
-                (tenant_id, kb_id, name or kb_id),
+                (tenant_id, kb_id, name or kb_id, default_visibility),
             )
 
     def get_kb(self, tenant_id: str, kb_id: str) -> dict | None:
         self._ensure_indexes()
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT tenant_id,kb_id,name,summary,frozen,summary_embedding_json,summary_dirty,summary_updated_at,status,stats,created_at,updated_at FROM knowledge_bases WHERE tenant_id=%s AND kb_id=%s",
+                "SELECT tenant_id,kb_id,name,visibility,summary,frozen,summary_embedding_json,summary_dirty,summary_updated_at,status,stats,created_at,updated_at FROM knowledge_bases WHERE tenant_id=%s AND kb_id=%s",
                 (tenant_id, kb_id),
             )
             row = cur.fetchone()
@@ -880,10 +902,118 @@ class KnowledgeBaseStore:
         self._ensure_indexes()
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT tenant_id,kb_id,name,summary,frozen,summary_embedding_json,summary_dirty,summary_updated_at,status,stats,created_at,updated_at FROM knowledge_bases WHERE tenant_id=%s ORDER BY created_at ASC",
+                "SELECT tenant_id,kb_id,name,visibility,summary,frozen,summary_embedding_json,summary_dirty,summary_updated_at,status,stats,created_at,updated_at FROM knowledge_bases WHERE tenant_id=%s ORDER BY created_at ASC",
                 (tenant_id,),
             )
             return [dict(row) for row in cur.fetchall()]
+
+    def list_accessible_kbs(self, tenant_id: str) -> list[dict]:
+        self._ensure_indexes()
+        safe_tenant = self._strip_nul(tenant_id)
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH candidates AS (
+                  SELECT
+                    kb.tenant_id AS owner_tenant_id,
+                    kb.kb_id,
+                    kb.name,
+                    kb.visibility,
+                    kb.summary,
+                    kb.frozen,
+                    kb.summary_embedding_json,
+                    kb.summary_dirty,
+                    kb.summary_updated_at,
+                    kb.status,
+                    kb.stats,
+                    kb.created_at,
+                    kb.updated_at,
+                    1 AS access_priority,
+                    'OWNER'::text AS access_mode
+                  FROM knowledge_bases kb
+                  WHERE kb.tenant_id=%s
+                  UNION ALL
+                  SELECT
+                    kb.tenant_id AS owner_tenant_id,
+                    kb.kb_id,
+                    kb.name,
+                    kb.visibility,
+                    kb.summary,
+                    kb.frozen,
+                    kb.summary_embedding_json,
+                    kb.summary_dirty,
+                    kb.summary_updated_at,
+                    kb.status,
+                    kb.stats,
+                    kb.created_at,
+                    kb.updated_at,
+                    2 AS access_priority,
+                    'BOUND'::text AS access_mode
+                  FROM kb_tenant_bindings b
+                  JOIN knowledge_bases kb
+                    ON kb.tenant_id=b.owner_tenant_id AND kb.kb_id=b.kb_id
+                  WHERE b.target_tenant_id=%s
+                  UNION ALL
+                  SELECT
+                    kb.tenant_id AS owner_tenant_id,
+                    kb.kb_id,
+                    kb.name,
+                    kb.visibility,
+                    kb.summary,
+                    kb.frozen,
+                    kb.summary_embedding_json,
+                    kb.summary_dirty,
+                    kb.summary_updated_at,
+                    kb.status,
+                    kb.stats,
+                    kb.created_at,
+                    kb.updated_at,
+                    3 AS access_priority,
+                    'SHARED_ALL'::text AS access_mode
+                  FROM knowledge_bases kb
+                  WHERE kb.visibility='SHARED_ALL'
+                )
+                SELECT DISTINCT ON (kb_id)
+                  owner_tenant_id AS tenant_id,
+                  kb_id,name,visibility,summary,frozen,summary_embedding_json,summary_dirty,summary_updated_at,status,stats,created_at,updated_at,
+                  access_mode,access_priority
+                FROM candidates
+                ORDER BY kb_id, access_priority ASC, updated_at DESC
+                """,
+                (safe_tenant, safe_tenant),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def resolve_kb_access_tenant(self, tenant_id: str, kb_id: str) -> str | None:
+        self._ensure_indexes()
+        safe_tenant = self._strip_nul(tenant_id)
+        safe_kb = self._strip_nul(kb_id)
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH candidates AS (
+                  SELECT tenant_id AS owner_tenant_id, 1 AS access_priority
+                  FROM knowledge_bases
+                  WHERE tenant_id=%s AND kb_id=%s
+                  UNION ALL
+                  SELECT owner_tenant_id, 2 AS access_priority
+                  FROM kb_tenant_bindings
+                  WHERE target_tenant_id=%s AND kb_id=%s
+                  UNION ALL
+                  SELECT tenant_id AS owner_tenant_id, 3 AS access_priority
+                  FROM knowledge_bases
+                  WHERE kb_id=%s AND visibility='SHARED_ALL'
+                )
+                SELECT owner_tenant_id
+                FROM candidates
+                ORDER BY access_priority ASC
+                LIMIT 1
+                """,
+                (safe_tenant, safe_kb, safe_tenant, safe_kb, safe_kb),
+            )
+            row = cur.fetchone() or {}
+            owner = self._strip_nul(row.get("owner_tenant_id"))
+            return owner or None
 
     def _resolve_unique_kb_name(self, tenant_id: str, requested_name: str, exclude_kb_id: str | None = None) -> str:
         self._ensure_indexes()
@@ -908,12 +1038,13 @@ class KnowledgeBaseStore:
         self._ensure_indexes()
         final_name = self._resolve_unique_kb_name(tenant_id, name)
         clean_summary = self._strip_nul(summary or "")
+        default_visibility = "SHARED_ALL" if str(tenant_id or "").strip() == "platform" else "PRIVATE"
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO knowledge_bases (tenant_id,kb_id,name,summary,status,summary_dirty,summary_updated_at,stats,created_at,updated_at)
-                VALUES (%s,%s,%s,%s,'ACTIVE',%s,%s,'{}'::jsonb,NOW(),NOW())
+                """INSERT INTO knowledge_bases (tenant_id,kb_id,name,visibility,summary,status,summary_dirty,summary_updated_at,stats,created_at,updated_at)
+                VALUES (%s,%s,%s,%s,%s,'ACTIVE',%s,%s,'{}'::jsonb,NOW(),NOW())
                 ON CONFLICT (tenant_id,kb_id) DO UPDATE SET
-                    name=EXCLUDED.name, summary=EXCLUDED.summary,
+                    name=EXCLUDED.name, visibility=EXCLUDED.visibility, summary=EXCLUDED.summary,
                     summary_dirty=EXCLUDED.summary_dirty,
                     summary_updated_at=EXCLUDED.summary_updated_at,
                     updated_at=NOW()""",
@@ -921,6 +1052,7 @@ class KnowledgeBaseStore:
                     tenant_id,
                     kb_id,
                     final_name,
+                    default_visibility,
                     clean_summary,
                     (False if clean_summary.strip() else True),
                     (datetime.now(timezone.utc) if clean_summary.strip() else None),
@@ -947,6 +1079,7 @@ class KnowledgeBaseStore:
     def delete_kb(self, tenant_id: str, kb_id: str) -> bool:
         self._ensure_indexes()
         with self._conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM kb_tenant_bindings WHERE owner_tenant_id=%s AND kb_id=%s", (tenant_id, kb_id))
             cur.execute("DELETE FROM documents WHERE tenant_id=%s AND kb_id=%s", (tenant_id, kb_id))
             cur.execute("DELETE FROM chunks WHERE tenant_id=%s AND kb_id=%s", (tenant_id, kb_id))
             cur.execute("DELETE FROM chunk_drafts WHERE tenant_id=%s AND kb_id=%s", (tenant_id, kb_id))
@@ -958,6 +1091,68 @@ class KnowledgeBaseStore:
         if self.qdrant.collection_exists(collection_name=collection_name):
             self.qdrant.delete_collection(collection_name=collection_name)
         return deleted
+
+    def set_kb_visibility(self, tenant_id: str, kb_id: str, visibility: str) -> dict | None:
+        self._ensure_indexes()
+        target = self._strip_nul(visibility).upper()
+        if target not in {"PRIVATE", "SHARED_ALL"}:
+            raise ValueError("visibility must be PRIVATE|SHARED_ALL")
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE knowledge_bases SET visibility=%s, updated_at=NOW() WHERE tenant_id=%s AND kb_id=%s",
+                (target, tenant_id, kb_id),
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get_kb(tenant_id, kb_id)
+
+    def list_kb_bindings(self, owner_tenant_id: str, kb_id: str) -> list[dict]:
+        self._ensure_indexes()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT owner_tenant_id,kb_id,target_tenant_id,created_by,created_at,updated_at
+                FROM kb_tenant_bindings
+                WHERE owner_tenant_id=%s AND kb_id=%s
+                ORDER BY updated_at DESC""",
+                (owner_tenant_id, kb_id),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def upsert_kb_binding(self, owner_tenant_id: str, kb_id: str, target_tenant_id: str, actor_id: str) -> dict | None:
+        self._ensure_indexes()
+        target = self._strip_nul(target_tenant_id)
+        if not target:
+            raise ValueError("target_tenant_id required")
+        if target == owner_tenant_id:
+            raise ValueError("owner tenant does not need explicit binding")
+        kb = self.get_kb(owner_tenant_id, kb_id)
+        if not kb:
+            return None
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO kb_tenant_bindings(owner_tenant_id,kb_id,target_tenant_id,created_by,created_at,updated_at)
+                VALUES (%s,%s,%s,%s,NOW(),NOW())
+                ON CONFLICT (owner_tenant_id,kb_id,target_tenant_id) DO UPDATE SET
+                  created_by=EXCLUDED.created_by,updated_at=NOW()""",
+                (owner_tenant_id, kb_id, target, self._strip_nul(actor_id or "system")),
+            )
+            cur.execute(
+                """SELECT owner_tenant_id,kb_id,target_tenant_id,created_by,created_at,updated_at
+                FROM kb_tenant_bindings
+                WHERE owner_tenant_id=%s AND kb_id=%s AND target_tenant_id=%s""",
+                (owner_tenant_id, kb_id, target),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def delete_kb_binding(self, owner_tenant_id: str, kb_id: str, target_tenant_id: str) -> bool:
+        self._ensure_indexes()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM kb_tenant_bindings WHERE owner_tenant_id=%s AND kb_id=%s AND target_tenant_id=%s",
+                (owner_tenant_id, kb_id, self._strip_nul(target_tenant_id)),
+            )
+            return bool(cur.rowcount and int(cur.rowcount) > 0)
 
     def set_kb_frozen(self, tenant_id: str, kb_id: str, frozen: bool) -> dict | None:
         self._ensure_indexes()

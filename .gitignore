@@ -19,6 +19,9 @@ venv/
 **/coverage/
 *.tsbuildinfo
 
+# Java build artifacts
+**/target/
+
 # Local runtime/generated config
 config/dev-frontends.pids.json
 config/stack.generated.env

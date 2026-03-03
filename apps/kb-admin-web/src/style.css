@@ -414,6 +414,39 @@ select {
   background: #fffaf4;
 }
 
+.kb-access-modal {
+  max-width: 760px;
+}
+
+.kb-binding-list {
+  display: grid;
+  gap: 8px;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid #e4d8ca;
+  border-radius: 10px;
+  padding: 10px;
+  background: #fffbf6;
+}
+
+.kb-binding-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #e2d4c3;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.kb-binding-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
 .kb-card-subtitle {
   margin-top: 2px;
   font-size: 0.84rem;

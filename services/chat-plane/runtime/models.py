@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -65,7 +65,11 @@ class ChatContext(BaseModel):
     memory_long_summary: str = ""
     memory_user_profile: str = ""
     memory_items: List[Dict] = Field(default_factory=list)
+    retrieval_query: str = ""
+    retrieval_query_meta: Dict[str, Any] = Field(default_factory=dict)
     retrieval_items: List[Dict] = Field(default_factory=list)
+    session_retrieval_items: List[Dict] = Field(default_factory=list)
+    keyword_context_items: List[Dict] = Field(default_factory=list)
     prompt_messages: List[Dict[str, str]] = Field(default_factory=list)
     response_text: str = ""
 

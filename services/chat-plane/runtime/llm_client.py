@@ -41,13 +41,35 @@ class LlmClient:
                 key_source = f"chat_api_pool.endpoint:{endpoint.endpoint_id}(fallback-runtime-key)"
         return base_url, model, api_key, key_source
 
+    def resolve_embedding_target(self) -> Tuple[str, str, str, str]:
+        endpoint = chat_api_pool_manager.get_default("chat_embedding")
+        base_url = str(get_setting("chat_embedding_base_url", self.base_url)).rstrip("/")
+        model = str(get_setting("chat_embedding_model", "BAAI/bge-m3"))
+        api_key = str(get_setting("chat_embedding_api_key", "") or "").strip() or self.api_key
+        key_source = "runtime_config.chat_embedding_api_key_or_siliconflow_api_key"
+        if endpoint:
+            base_url = endpoint.base_url.rstrip("/")
+            model = endpoint.model
+            endpoint_key = str(endpoint.api_key or "").strip()
+            if endpoint_key:
+                api_key = endpoint_key
+                key_source = f"chat_api_pool.endpoint:{endpoint.endpoint_id}"
+            else:
+                key_source = f"chat_api_pool.endpoint:{endpoint.endpoint_id}(fallback-runtime-key)"
+        return base_url, model, api_key, key_source
+
     def runtime_meta(self) -> Dict[str, str]:
         base_url, model, api_key, key_source = self.resolve_request_target()
+        emb_base_url, emb_model, emb_api_key, emb_key_source = self.resolve_embedding_target()
         return {
             "base_url": base_url,
             "model": model,
             "key_source": key_source,
             "api_key_configured": "yes" if bool(api_key) else "no",
+            "embedding_base_url": emb_base_url,
+            "embedding_model": emb_model,
+            "embedding_key_source": emb_key_source,
+            "embedding_api_key_configured": "yes" if bool(emb_api_key) else "no",
         }
 
     async def stream_chat(self, messages: List[Dict[str, str]]) -> AsyncGenerator[str, None]:
@@ -114,6 +136,37 @@ class LlmClient:
             obj = resp.json()
             content = (((obj.get("choices") or [{}])[0]).get("message") or {}).get("content")
             return str(content or "").strip()
+
+    async def embed_text(self, text: str) -> List[float]:
+        base_url, model, api_key, _ = self.resolve_embedding_target()
+        t = str(text or "").strip()
+        if not t:
+            return []
+        if not api_key:
+            # deterministic local fallback for dev (small pseudo-vector)
+            import hashlib
+
+            digest = hashlib.sha256(t.encode("utf-8")).digest()
+            out: List[float] = []
+            for i in range(0, len(digest), 4):
+                part = digest[i : i + 4]
+                if len(part) < 4:
+                    break
+                n = int.from_bytes(part, byteorder="big", signed=False)
+                out.append(((n % 20000) / 10000.0) - 1.0)
+            return out
+        url = f"{base_url}/embeddings"
+        payload = {"model": model, "input": t}
+        timeout = httpx.Timeout(self.timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, headers=self._headers(api_key), json=payload)
+            resp.raise_for_status()
+            obj = resp.json()
+            data = obj.get("data") or []
+            if not data:
+                return []
+            emb = (data[0] or {}).get("embedding") or []
+            return [float(x) for x in emb]
 
 
 llm_client = LlmClient()
