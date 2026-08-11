@@ -30,8 +30,18 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         return path.startsWith("/api/v1/auth/login")
                 || path.startsWith("/api/v1/auth/refresh")
                 || path.startsWith("/api/v1/auth/register")
+                || path.startsWith("/api/v1/auth/invitations/accept")
+                || path.startsWith("/api/v1/setup/status")
+                || path.startsWith("/api/v1/internal/")
+                || isPublishedDeploymentPath(path)
                 || path.startsWith("/api/v1/system/health")
                 || path.startsWith("/actuator/health");
+    }
+
+    private boolean isPublishedDeploymentPath(String path) {
+        if (!path.startsWith("/api/v1/deployments/")) return false;
+        String suffix = path.substring("/api/v1/deployments/".length());
+        return suffix.matches("[^/]+/invoke(?:/[^/]+)?");
     }
 
     @Override
@@ -60,6 +70,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             request.setAttribute("auth.tenant_id", claims.tenantId());
             request.setAttribute("auth.actor_id", claims.sub());
             request.setAttribute("auth.roles", claims.roles());
+            request.setAttribute("auth.jwt_key_slot", claims.keySlot());
+            request.setAttribute("auth.jwt_legacy_format", claims.legacyFormat());
             filterChain.doFilter(request, response);
         } catch (ResponseStatusException ex) {
             response.setStatus(ex.getStatusCode().value());

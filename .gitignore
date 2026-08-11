@@ -1,4 +1,8 @@
 logs/
+data/backups/
+data/chat-plane/chat_api_pool_state.json
+data/chat-plane/chat_history_store.json
+docs/debug_logs/*.txt
 **/__pycache__/
 *.pyc
 
@@ -25,9 +29,22 @@ venv/
 # Local runtime/generated config
 config/dev-frontends.pids.json
 config/stack.generated.env
+config/runtime-config.user.json
+config/runtime-config copy.json
+.local/
+
+# Local verification evidence and agent planning state
+artifacts/
+task_plan.md
+findings.md
+progress.md
+
+# Unrelated local references / prototypes
+front_end_example/
 
 # Local environment files (keep examples)
 .env
+.env.production
 .env.local
 .env.*.local
 **/.env.local
@@ -36,6 +53,11 @@ config/stack.generated.env
 .DS_Store
 Thumbs.db
 .idea/
+.vscode/
+*.log
+*.pid
+*.tmp
+*.bak
 
 # example frontend
 apps/example-frontend

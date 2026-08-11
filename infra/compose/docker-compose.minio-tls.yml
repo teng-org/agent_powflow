@@ -1,0 +1,44 @@
+services:
+  minio:
+    volumes:
+      - ../../.local/minio-certs/server.crt:/root/.minio/certs/public.crt:ro
+      - ../../.local/minio-certs/server.key:/root/.minio/certs/private.key:ro
+      - ../../.local/minio-certs/ca.crt:/root/.minio/certs/CAs/agent-powflow-ca.crt:ro
+
+  minio-service-identity-init:
+    environment:
+      MINIO_SCHEME: https
+    volumes:
+      - ../../.local/minio-certs/ca.crt:/tmp/.mc/certs/CAs/agent-powflow-ca.crt:ro
+
+  minio-document-bucket-init:
+    environment:
+      MINIO_SECURE: "true"
+      MINIO_CA_CERT_PATH: /etc/agent-powflow/minio-ca.crt
+    volumes:
+      - ../../.local/minio-certs/ca.crt:/etc/agent-powflow/minio-ca.crt:ro
+
+  execution-api:
+    environment:
+      MINIO_SECURE: "true"
+      MINIO_CA_CERT_PATH: /etc/agent-powflow/minio-ca.crt
+    volumes:
+      - ../../.local/minio-certs/ca.crt:/etc/agent-powflow/minio-ca.crt:ro
+
+  execution-worker:
+    environment:
+      MINIO_SECURE: "true"
+      MINIO_CA_CERT_PATH: /etc/agent-powflow/minio-ca.crt
+    volumes:
+      - ../../.local/minio-certs/ca.crt:/etc/agent-powflow/minio-ca.crt:ro
+
+  minio-metrics-token-init:
+    environment:
+      MINIO_SCHEME: https
+    volumes:
+      - ../../.local/minio-certs/ca.crt:/tmp/.mc/certs/CAs/agent-powflow-ca.crt:ro
+
+  prometheus:
+    volumes:
+      - ../observability/prometheus.minio-tls.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../.local/minio-certs/ca.crt:/etc/prometheus/tls/minio-ca.crt:ro

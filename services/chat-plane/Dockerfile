@@ -11,4 +11,4 @@ RUN PIP_CONFIG_FILE=/dev/null PIP_REQUIRE_HASHES=0 pip install --no-cache-dir -r
 
 COPY services/chat-plane /app/services/chat-plane
 
-CMD ["uvicorn", "api.app.main:app", "--host", "0.0.0.0", "--port", "8092"]
+CMD ["sh", "-c", "python -m runtime.schema_migrations && exec uvicorn api.app.main:app --host 0.0.0.0 --port 8092"]

@@ -1,0 +1,133 @@
+name: Quality Gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [web-app, web-admin, debug-web, kb-admin-web]
+    defaults:
+      run:
+        working-directory: apps/${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/${{ matrix.app }}/package-lock.json
+      - run: npm ci
+      - run: npm test --if-present
+      - run: npm run build
+
+  python-and-contracts:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: apf
+          POSTGRES_PASSWORD: apf
+          POSTGRES_DB: agentpowflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U apf -d agentpowflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      EXECUTION_TEST_POSTGRES_DSN: postgresql://apf:apf@localhost:5432/agentpowflow
+      EXECUTION_TEST_MINIO_ENDPOINT: localhost:9000
+      EXECUTION_TEST_MINIO_ACCESS_KEY: minioadmin
+      EXECUTION_TEST_MINIO_SECRET_KEY: minioadmin
+      CHAT_TEST_POSTGRES_DSN: postgresql://apf:apf@localhost:5432/agentpowflow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Python test dependencies
+        run: python -m pip install -r services/execution-plane/requirements.txt
+      - name: Start MinIO integration service
+        run: |
+          docker run -d --name apf-test-minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/ready >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          docker logs apf-test-minio
+          exit 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Compile Python services
+        run: python -m compileall -q services/chat-plane services/execution-plane
+      - name: Verify repository secret hygiene
+        run: |
+          python -m unittest tools.audit.test_secret_hygiene -v
+          python tools/audit/verify_secret_hygiene.py
+          pwsh -NoProfile -File tools/audit/production-secret-policy-smoke.ps1
+      - name: Migrate Chat Plane test database
+        working-directory: services/chat-plane
+        env:
+          POSTGRES_DSN: ${{ env.CHAT_TEST_POSTGRES_DSN }}
+        run: python -m runtime.schema_migrations
+      - name: Run Chat Plane tests
+        working-directory: services/chat-plane
+        run: python -m unittest discover -s tests -v
+      - name: Migrate Execution Plane test database
+        working-directory: services/execution-plane
+        env:
+          POSTGRES_DSN: ${{ env.EXECUTION_TEST_POSTGRES_DSN }}
+        run: python -m retrieval.schema_migrations
+      - name: Run Execution Plane unit tests
+        run: python -m unittest discover -s services/execution-plane/tests -p 'test_*.py' -v
+      - name: Verify debug endpoint catalog
+        run: node tools/audit/verify-endpoint-catalog.mjs
+      - name: Validate Compose configuration
+        run: docker compose --env-file config/service-ports.env -f infra/compose/docker-compose.stack.yml config --quiet
+
+  control-plane:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: apf
+          POSTGRES_PASSWORD: apf
+          POSTGRES_DB: agentpowflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U apf -d agentpowflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CONTROL_TEST_POSTGRES_JDBC_URL: jdbc:postgresql://localhost:5432/agentpowflow
+      CONTROL_TEST_POSTGRES_USER: apf
+      CONTROL_TEST_POSTGRES_PASSWORD: apf
+    defaults:
+      run:
+        working-directory: services/control-plane
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - run: mvn --batch-mode test

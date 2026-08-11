@@ -25,8 +25,8 @@ class ApiPoolMongoStore:
     Storage has been migrated from MongoDB to PostgreSQL.
     """
 
-    def __init__(self, namespace: str = "api_pool") -> None:
-        self.dsn = _postgres_dsn()
+    def __init__(self, namespace: str = "api_pool", dsn: str | None = None) -> None:
+        self.dsn = (dsn or _postgres_dsn()).strip()
         self._initialized = False
         raw = (namespace or "api_pool").strip().lower()
         self.namespace = re.sub(r"[^a-z0-9_]", "_", raw) or "api_pool"
@@ -39,28 +39,9 @@ class ApiPoolMongoStore:
     def _ensure_schema(self) -> None:
         if self._initialized:
             return
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {self.settings_table} (
-                    settings_key TEXT PRIMARY KEY,
-                    default_endpoint_id TEXT NULL,
-                    default_endpoint_ids JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
-            cur.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {self.endpoints_table} (
-                    endpoint_id TEXT PRIMARY KEY,
-                    payload JSONB NOT NULL,
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
+        from retrieval.schema_migrations import require_database_current
+
+        require_database_current(self.dsn)
         self._initialized = True
 
     def load(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -77,6 +58,7 @@ class ApiPoolMongoStore:
             settings = {
                 "default_endpoint_id": row.get("default_endpoint_id"),
                 "default_endpoint_ids": row.get("default_endpoint_ids") or {},
+                "_initialized": bool(row),
             }
             cur.execute(f"SELECT payload FROM {self.endpoints_table} ORDER BY created_at ASC")
             endpoints = [dict(r.get("payload") or {}) for r in cur.fetchall()]

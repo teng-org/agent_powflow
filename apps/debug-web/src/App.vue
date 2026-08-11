@@ -340,6 +340,9 @@ async function invokeEndpoint() {
     const contentType = response.headers.get('content-type') || ''
     if (contentType.includes('application/json')) {
       const json = await response.json()
+      if (json && json.no_change === true) {
+        result.error = '提示：本次操作幂等无变化（no_change=true），后端未重复写入。'
+      }
       result.responseBody = JSON.stringify(json, null, 2)
     } else {
       result.responseBody = await response.text()

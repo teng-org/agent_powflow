@@ -1,0 +1,60 @@
+groups:
+  - name: agent-powflow-minio-capacity
+    rules:
+      - alert: AgentPowflowMinioMetricsAbsent
+        expr: absent(minio_cluster_capacity_usable_total_bytes)
+        for: 2m
+        labels:
+          severity: critical
+          component: minio
+        annotations:
+          summary: MinIO cluster metrics are unavailable
+          description: Prometheus has not received the MinIO usable-capacity metric for two minutes.
+
+      - alert: AgentPowflowMinioDriveOffline
+        expr: sum(minio_cluster_drive_offline_total) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: minio
+        annotations:
+          summary: MinIO has offline drives
+          description: One or more MinIO drives have been offline for at least one minute.
+
+      - alert: AgentPowflowMinioNodeOffline
+        expr: sum(minio_cluster_nodes_offline_total) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: minio
+        annotations:
+          summary: MinIO has offline nodes
+          description: One or more MinIO nodes have been offline for at least one minute.
+
+      - alert: AgentPowflowMinioUsableCapacityLow
+        expr: |
+          sum(minio_cluster_capacity_usable_total_bytes) > 0
+          and
+          sum(minio_cluster_capacity_usable_free_bytes)
+            / sum(minio_cluster_capacity_usable_total_bytes) < 0.20
+        for: 10m
+        labels:
+          severity: warning
+          component: minio
+        annotations:
+          summary: MinIO usable free capacity is below 20 percent
+          description: Expand storage or remove data through supported business deletion paths.
+
+      - alert: AgentPowflowMinioUsableCapacityCritical
+        expr: |
+          sum(minio_cluster_capacity_usable_total_bytes) > 0
+          and
+          sum(minio_cluster_capacity_usable_free_bytes)
+            / sum(minio_cluster_capacity_usable_total_bytes) < 0.10
+        for: 5m
+        labels:
+          severity: critical
+          component: minio
+        annotations:
+          summary: MinIO usable free capacity is below 10 percent
+          description: New object writes are at risk; expand storage or perform audited cleanup immediately.

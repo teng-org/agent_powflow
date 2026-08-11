@@ -26,9 +26,18 @@ public class SecurityConfig {
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/error").permitAll()
                         .requestMatchers("/api/v1/system/health").permitAll()
-                        .requestMatchers("/api/v1/auth/login", "/api/v1/auth/refresh", "/api/v1/auth/register").permitAll()
-                        .requestMatchers("/api/v1/admin/**").hasAnyRole("PLATFORM_ADMIN", "TENANT_ADMIN")
+                        .requestMatchers("/api/v1/setup/status").permitAll()
+                        .requestMatchers(
+                                "/api/v1/auth/login",
+                                "/api/v1/auth/refresh",
+                                "/api/v1/auth/register",
+                                "/api/v1/auth/invitations/accept"
+                        ).permitAll()
+                        .requestMatchers("/api/v1/deployments/*/invoke", "/api/v1/deployments/*/invoke/*").permitAll()
+                        .requestMatchers("/api/v1/internal/**").permitAll()
+                        .requestMatchers("/api/v1/admin/**").hasRole("PLATFORM_ADMIN")
                         .anyRequest().authenticated()
                 )
                 .httpBasic(httpBasic -> httpBasic.disable())

@@ -1,22 +1,31 @@
 import hashlib
 import re
+import time
 from typing import Callable
 
 from models.ai_gateway import ai_gateway
 from models.embedding_provider import embedding_provider
 from retrieval.schemas import IngestDocumentRequest, SearchRequest
+from retrieval.rag2 import fuse_rankings, limit_per_document, normalize_rank_method
 from retrieval.store import ChunkRecord, kb_store
+from retrieval.index_lifecycle import index_lifecycle
+from retrieval.structured_chunking import build_parent_child_chunks, parse_content_blocks
+from models.reranker_provider import reranker_provider
+from runtime.task_authority import TaskAuthorityBridge
+
+
+task_authority = TaskAuthorityBridge(kb_store)
 
 
 def _strip_nul(text: str) -> str:
-    return (text or "").replace("\x00", "")
+    return re.sub(r"[\x00\ud800-\udfff]", "", text or "")
 
 def _emit_stage(req: IngestDocumentRequest, stage: str, status: str = "RUNNING") -> None:
     if not req.task_id:
         return
     task_status = "SUCCEEDED" if status == "SUCCEEDED" else "RUNNING"
-    kb_store.update_task_record(req.task_id, task_status, stage)
-    kb_store.append_task_event(
+    task_authority.update_task_record(req.task_id, task_status, stage)
+    task_authority.append_task_event(
         req.task_id,
         req.tenant_id,
         req.kb_id,
@@ -33,8 +42,8 @@ def _emit_progress(req: IngestDocumentRequest, stage: str, current: int, total: 
     c = max(0, int(current or 0))
     t = max(0, int(total or 0))
     pct = int((c * 100 / t)) if t > 0 else 0
-    kb_store.update_task_progress(req.task_id, stage, c, t, pct)
-    kb_store.append_task_event(
+    task_authority.update_task_progress(req.task_id, stage, c, t, pct)
+    task_authority.append_task_event(
         req.task_id,
         req.tenant_id,
         req.kb_id,
@@ -323,48 +332,85 @@ def ingest_document(req: IngestDocumentRequest) -> dict:
     _emit_stage(req, "PARSING")
 
     preprocessed = cleaned_content.strip()
-    chunk_texts = _chunk_text(
-        preprocessed,
-        req.chunk_size,
-        req.chunk_overlap,
-        req.chunk_method,
-        req.chunk_delimiter,
-    )
     max_chars = embedding_provider.max_input_chars(req.tenant_id)
-    if max_chars:
-        safe_chunks: list[str] = []
-        for text in chunk_texts:
-            safe_chunks.extend(_split_for_embedding_limit(text, max_chars=max_chars, overlap=min(40, req.chunk_overlap)))
-        chunk_texts = safe_chunks
+    structured_chunks = []
+    if (req.chunk_method or "fixed").strip().lower() not in {"sentence", "delimiter"}:
+        structured_chunks = build_parent_child_chunks(
+            parse_content_blocks(preprocessed),
+            identity=f"{req.tenant_id}:{req.kb_id}:{req.doc_id}",
+            child_size=req.chunk_size,
+            child_overlap=req.chunk_overlap,
+            max_child_chars=max_chars or None,
+        )
+    chunk_texts = [item.text for item in structured_chunks]
+    if not chunk_texts:
+        chunk_texts = _chunk_text(
+            preprocessed,
+            req.chunk_size,
+            req.chunk_overlap,
+            req.chunk_method,
+            req.chunk_delimiter,
+        )
+        if max_chars:
+            safe_chunks: list[str] = []
+            for text in chunk_texts:
+                safe_chunks.extend(_split_for_embedding_limit(text, max_chars=max_chars, overlap=min(40, req.chunk_overlap)))
+            chunk_texts = safe_chunks
     kb_store.set_document_chunking_preview(req.tenant_id, req.kb_id, req.doc_id, len(chunk_texts))
-    kb_store.replace_chunks_preview(
-        req.tenant_id,
-        req.kb_id,
-        req.doc_id,
-        chunk_texts,
-        safe_filename,
-    )
+    existing_chunks = kb_store.list_document_chunks_for_embedding(req.tenant_id, req.kb_id, req.doc_id)
+    existing_texts = [_strip_nul(str(item.get("text") or "")) for item in existing_chunks]
+    next_texts = [_strip_nul(text) for text in chunk_texts]
+    if existing_texts != next_texts:
+        kb_store.replace_chunks_preview(
+            req.tenant_id,
+            req.kb_id,
+            req.doc_id,
+            next_texts,
+            safe_filename,
+        )
+    if structured_chunks:
+        kb_store.replace_chunk_structure(
+            req.tenant_id,
+            req.kb_id,
+            req.doc_id,
+            [
+                {
+                    **item.metadata(),
+                    "parent_text": item.parent_text,
+                }
+                for item in structured_chunks
+            ],
+            safe_filename,
+        )
+    existing_chunks = kb_store.list_document_chunks_for_embedding(req.tenant_id, req.kb_id, req.doc_id)
     _emit_stage(req, "CHUNKING")
 
     kb_store.set_document_status(req.tenant_id, req.kb_id, req.doc_id, "EMBEDDING")
     _emit_stage(req, "EMBEDDING")
-    total_chunks = len(chunk_texts)
-    _emit_progress(req, "EMBEDDING", 0, total_chunks)
-    chunks: list[ChunkRecord] = []
+    total_chunks = len(next_texts)
+    existing_by_index = {int(item.get("chunk_index") or 0): item for item in existing_chunks}
+    embedded_done = sum(1 for item in existing_chunks if item.get("embedding_json"))
+    _emit_progress(req, "EMBEDDING", embedded_done, total_chunks)
     emit_step = max(1, total_chunks // 50) if total_chunks > 0 else 1
-    for idx, chunk_text in enumerate(chunk_texts):
+    for idx, chunk_text in enumerate(next_texts):
         if _is_task_cancel_requested(req):
             raise RuntimeError("TASK_CANCELLED")
+        existing = existing_by_index.get(idx) or {}
+        existing_embedding = existing.get("embedding_json") or []
         raw = f"{req.tenant_id}:{req.kb_id}:{req.doc_id}:{idx}:{chunk_text}"
         chunk_id = hashlib.sha1(raw.encode("utf-8")).hexdigest()  # nosec B324
-        vector = embedding_provider.embed(
-            req.tenant_id,
-            chunk_text,
-            task="doc_embedding",
-            kb_id=req.kb_id,
-            doc_id=req.doc_id,
-        )
-        chunks.append(
+        if existing_embedding:
+            vector = existing_embedding
+        else:
+            vector = embedding_provider.embed(
+                req.tenant_id,
+                chunk_text,
+                task="doc_embedding",
+                kb_id=req.kb_id,
+                doc_id=req.doc_id,
+            )
+        structure = structured_chunks[idx].metadata() if idx < len(structured_chunks) else {}
+        kb_store.persist_chunk_embedding(
             ChunkRecord(
                 tenant_id=req.tenant_id,
                 kb_id=req.kb_id,
@@ -373,7 +419,7 @@ def ingest_document(req: IngestDocumentRequest) -> dict:
                 chunk_index=idx,
                 text=chunk_text,
                 embedding=vector,
-                metadata={"filename": safe_filename},
+                metadata={"filename": safe_filename, **structure},
             )
         )
         done = idx + 1
@@ -382,8 +428,19 @@ def ingest_document(req: IngestDocumentRequest) -> dict:
 
     kb_store.set_document_status(req.tenant_id, req.kb_id, req.doc_id, "INDEXING")
     _emit_stage(req, "INDEXING")
-    kb_store.replace_chunks(req.tenant_id, req.kb_id, req.doc_id, chunks)
+    counters = kb_store.publish_document_embeddings(req.tenant_id, req.kb_id, req.doc_id)
+    if int(counters.get("embedded_count") or 0) < total_chunks:
+        raise RuntimeError("document embedding incomplete")
     kb_store.set_document_status(req.tenant_id, req.kb_id, req.doc_id, "INDEXED")
+    try:
+        index_lifecycle.sync_document_to_active(req.tenant_id, req.kb_id, req.doc_id)
+    except Exception:
+        # The active revision is the publication authority. Do not expose a
+        # document as indexed when its revision-scoped snapshot could not be
+        # updated; the task retry can republish it safely.
+        kb_store.set_document_status(req.tenant_id, req.kb_id, req.doc_id, "FAILED")
+        raise
+    kb_store.refresh_rag_index_manifest(req.tenant_id, req.kb_id)
     if req.auto_summary:
         _emit_stage(req, "SUMMARIZING")
         try:
@@ -402,26 +459,151 @@ def ingest_document(req: IngestDocumentRequest) -> dict:
     return {
         "doc_id": req.doc_id,
         "kb_id": req.kb_id,
-        "chunks_indexed": len(chunks),
+        "chunks_indexed": total_chunks,
         "status": "INDEXED",
     }
 
 
+def search_with_meta(req: SearchRequest, *, store=None) -> dict:
+    retrieval_store = store or kb_store
+    started = time.perf_counter()
+    method = normalize_rank_method(req.rank_method)
+    final_k = max(1, min(int(req.final_k or req.top_k), 50))
+    rerank_k = max(final_k, min(int(req.rerank_k or 30), 100)) if req.rerank_enabled else final_k
+    candidate_k = max(rerank_k, min(int(req.candidate_k or max(final_k * 5, 20)), 200))
+    dense_items: list[dict] = []
+    lexical_items: list[dict] = []
+    dense_ms = 0.0
+    lexical_ms = 0.0
+    if method != "keyword":
+        dense_started = time.perf_counter()
+        expected_dim = retrieval_store.get_kb_embedding_dimension(req.tenant_id, req.kb_id)
+        query_vec = embedding_provider.embed(
+            req.tenant_id,
+            req.query,
+            task="query_embedding",
+            kb_id=req.kb_id,
+            doc_id="",
+            local_dimensions=expected_dim or None,
+        )
+        if expected_dim > 0 and len(query_vec) != expected_dim:
+            query_vec = embedding_provider.local_embed(req.query, dimensions=expected_dim)
+        dense_items = retrieval_store.search_chunks(
+            tenant_id=req.tenant_id,
+            kb_id=req.kb_id,
+            query_vector=query_vec,
+            top_k=candidate_k,
+            doc_ids=req.doc_ids,
+            index_revision=req.index_revision,
+        )
+        dense_ms = (time.perf_counter() - dense_started) * 1000.0
+    if method in {"hybrid", "rrf", "keyword"}:
+        lexical_started = time.perf_counter()
+        lexical_items = retrieval_store.search_lexical_chunks(
+            tenant_id=req.tenant_id,
+            kb_id=req.kb_id,
+            query=req.query,
+            top_k=candidate_k,
+            doc_ids=req.doc_ids,
+            index_revision=req.index_revision,
+        )
+        lexical_ms = (time.perf_counter() - lexical_started) * 1000.0
+    effective_method = method
+    if method in {"hybrid", "rrf"}:
+        if lexical_items:
+            evidence = fuse_rankings(
+                dense_items,
+                lexical_items,
+                final_k=rerank_k,
+                max_chunks_per_doc=req.max_chunks_per_doc,
+            )
+        else:
+            effective_method = "vector_fallback"
+            evidence = limit_per_document(dense_items, rerank_k, req.max_chunks_per_doc)
+    elif method == "keyword":
+        evidence = limit_per_document(lexical_items, rerank_k, req.max_chunks_per_doc)
+    else:
+        evidence = limit_per_document(dense_items, rerank_k, req.max_chunks_per_doc)
+    rerank_meta: dict = {
+        "requested": bool(req.rerank_enabled),
+        "required": bool(req.rerank_required),
+        "status": "not_requested",
+        "candidate_count": len(evidence),
+        "returned_count": min(len(evidence), final_k),
+    }
+    if req.rerank_enabled and evidence:
+        pre_rerank_count = len(evidence[:rerank_k])
+        try:
+            rerank_result = reranker_provider.rerank(
+                tenant_id=req.tenant_id,
+                kb_id=req.kb_id,
+                query=req.query,
+                items=evidence[:rerank_k],
+                top_n=final_k,
+            )
+            evidence = list(rerank_result.get("items") or [])
+            rerank_meta = {"requested": True, "required": bool(req.rerank_required), **dict(rerank_result.get("meta") or {})}
+        except Exception as exc:
+            if req.rerank_required:
+                raise
+            evidence = evidence[:final_k]
+            rerank_meta = {
+                "requested": True,
+                "required": False,
+                "status": "fallback",
+                "reason": str(exc)[:400],
+                "candidate_count": pre_rerank_count,
+                "returned_count": len(evidence),
+            }
+    else:
+        evidence = evidence[:final_k]
+        if req.rerank_enabled:
+            rerank_meta["status"] = "skipped_empty"
+    if req.context_window > 0 and evidence:
+        evidence = retrieval_store.expand_chunk_context(
+            req.tenant_id,
+            req.kb_id,
+            evidence,
+            window=req.context_window,
+            index_revision=req.index_revision,
+        )
+    for item in evidence:
+        item["score"] = round(float(item.get("score") or 0.0), 6)
+        scores = item.get("scores") or {}
+        item["scores"] = {
+            str(key): round(float(value), 6) if isinstance(value, (int, float)) else value
+            for key, value in scores.items()
+        }
+    manifest = retrieval_store.get_rag_index_manifest(req.tenant_id, req.kb_id, req.index_revision)
+    return {
+        "evidence": evidence,
+        "meta": {
+            "requested_rank_method": method,
+            "effective_rank_method": effective_method,
+            "candidate_k": candidate_k,
+            "final_k": final_k,
+            "rerank_k": rerank_k if req.rerank_enabled else 0,
+            "rerank": rerank_meta,
+            "dense_candidates": len(dense_items),
+            "lexical_candidates": len(lexical_items),
+            "returned_count": len(evidence),
+            "context_window": req.context_window,
+            "dense_ms": round(dense_ms, 3),
+            "lexical_ms": round(lexical_ms, 3),
+            "total_ms": round((time.perf_counter() - started) * 1000.0, 3),
+            "index_revision": str(manifest.get("index_revision") or "legacy-v1"),
+            "lexical_coverage": (
+                round(
+                    int(manifest.get("lexical_chunk_count") or 0)
+                    / max(1, int(manifest.get("chunk_count") or 0)),
+                    4,
+                )
+                if int(manifest.get("chunk_count") or 0) > 0
+                else 0.0
+            ),
+        },
+    }
+
+
 def search(req: SearchRequest) -> list[dict]:
-    query_vec = embedding_provider.embed(
-        req.tenant_id,
-        req.query,
-        task="query_embedding",
-        kb_id=req.kb_id,
-        doc_id="",
-    )
-    data = kb_store.search_chunks(
-        tenant_id=req.tenant_id,
-        kb_id=req.kb_id,
-        query_vector=query_vec,
-        top_k=req.top_k,
-        doc_ids=req.doc_ids,
-    )
-    for item in data:
-        item["score"] = round(item["score"], 4)
-    return data
+    return list(search_with_meta(req)["evidence"])

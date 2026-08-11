@@ -11,6 +11,12 @@ public class AuthProperties {
     private String adminRole = "PLATFORM_ADMIN";
     private String adminTenantId = "platform";
     private String jwtSecret = "change-me-in-production";
+    private String jwtKeyId = "dev-primary";
+    private String jwtPreviousKeys = "";
+    private String jwtPreviousKeysExpiresAt = "";
+    private String jwtLegacyAcceptUntil = "";
+    private String jwtIssuer = "agentpowflow-control";
+    private String jwtAudience = "control-plane";
     private long accessTtlSeconds = 43200L;
     private long refreshTtlSeconds = 604800L;
 
@@ -54,6 +60,30 @@ public class AuthProperties {
         this.jwtSecret = jwtSecret;
     }
 
+    public String getJwtKeyId() { return jwtKeyId; }
+
+    public void setJwtKeyId(String jwtKeyId) { this.jwtKeyId = jwtKeyId; }
+
+    public String getJwtPreviousKeys() { return jwtPreviousKeys; }
+
+    public void setJwtPreviousKeys(String jwtPreviousKeys) { this.jwtPreviousKeys = jwtPreviousKeys; }
+
+    public String getJwtPreviousKeysExpiresAt() { return jwtPreviousKeysExpiresAt; }
+
+    public void setJwtPreviousKeysExpiresAt(String jwtPreviousKeysExpiresAt) { this.jwtPreviousKeysExpiresAt = jwtPreviousKeysExpiresAt; }
+
+    public String getJwtLegacyAcceptUntil() { return jwtLegacyAcceptUntil; }
+
+    public void setJwtLegacyAcceptUntil(String jwtLegacyAcceptUntil) { this.jwtLegacyAcceptUntil = jwtLegacyAcceptUntil; }
+
+    public String getJwtIssuer() { return jwtIssuer; }
+
+    public void setJwtIssuer(String jwtIssuer) { this.jwtIssuer = jwtIssuer; }
+
+    public String getJwtAudience() { return jwtAudience; }
+
+    public void setJwtAudience(String jwtAudience) { this.jwtAudience = jwtAudience; }
+
     public long getAccessTtlSeconds() {
         return accessTtlSeconds;
     }
@@ -70,4 +100,3 @@ public class AuthProperties {
         this.refreshTtlSeconds = refreshTtlSeconds;
     }
 }
-

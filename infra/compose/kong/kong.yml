@@ -1,0 +1,39 @@
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: powflow-published-runtime
+    url: http://control-plane:8080
+    connect_timeout: 5000
+    read_timeout: 120000
+    write_timeout: 120000
+    retries: 1
+    routes:
+      - name: published-deployment-invoke
+        paths:
+          - /api/v1/deployments
+        methods:
+          - POST
+          - OPTIONS
+        strip_path: false
+        preserve_host: false
+        protocols:
+          - http
+          - https
+    plugins:
+      - name: correlation-id
+        config:
+          header_name: X-Request-Id
+          generator: uuid
+          echo_downstream: true
+      - name: request-size-limiting
+        config:
+          allowed_payload_size: 2
+          size_unit: megabytes
+          require_content_length: false
+      - name: rate-limiting
+        config:
+          minute: 600
+          policy: local
+          limit_by: ip
+          hide_client_headers: false

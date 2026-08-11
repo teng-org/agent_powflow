@@ -37,6 +37,11 @@ def route_meta(method: str, path_template: str) -> dict[str, str]:
     mapping: dict[tuple[str, str], dict[str, str]] = {
         ("POST", "/api/v1/admin/auth/login"): {"event": "kb.auth.login", "action": "login", "resource_type": "auth"},
         ("POST", "/api/v1/admin/auth/logout"): {"event": "kb.auth.logout", "action": "logout", "resource_type": "auth"},
+        ("GET", "/api/v1/admin/workflow-secrets"): {"event": "workflow.secret.list", "action": "read", "resource_type": "workflow_secret"},
+        ("POST", "/api/v1/admin/workflow-secrets"): {"event": "workflow.secret.create", "action": "create", "resource_type": "workflow_secret"},
+        ("PUT", "/api/v1/admin/workflow-secrets/{secret_id}"): {"event": "workflow.secret.rotate", "action": "rotate", "resource_type": "workflow_secret"},
+        ("POST", "/api/v1/admin/workflow-secrets/{secret_id}/disable"): {"event": "workflow.secret.disable", "action": "disable", "resource_type": "workflow_secret"},
+        ("DELETE", "/api/v1/admin/workflow-secrets/{secret_id}"): {"event": "workflow.secret.delete", "action": "delete", "resource_type": "workflow_secret"},
         ("GET", "/api/v1/admin/kbs"): {"event": "kb.kb.list", "action": "read", "resource_type": "kb"},
         ("POST", "/api/v1/admin/kbs"): {"event": "kb.kb.create", "action": "create", "resource_type": "kb"},
         ("PATCH", "/api/v1/admin/kbs/{kb_id}"): {"event": "kb.kb.rename", "action": "update", "resource_type": "kb"},
@@ -46,6 +51,8 @@ def route_meta(method: str, path_template: str) -> dict[str, str]:
         ("POST", "/api/v1/admin/kbs/{kb_id}/documents/ingest"): {"event": "kb.document.ingest", "action": "create", "resource_type": "document"},
         ("POST", "/api/v1/admin/kbs/{kb_id}/documents/batch"): {"event": "kb.document.batch", "action": "update", "resource_type": "document"},
         ("GET", "/api/v1/admin/kbs/{kb_id}/documents"): {"event": "kb.document.list", "action": "read", "resource_type": "document"},
+        ("GET", "/api/v1/admin/kbs/{kb_id}/documents/{doc_id}"): {"event": "kb.document.read", "action": "read", "resource_type": "document"},
+        ("GET", "/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/source"): {"event": "kb.document.source.download", "action": "download", "resource_type": "document_object"},
         ("DELETE", "/api/v1/admin/kbs/{kb_id}/documents/{doc_id}"): {"event": "kb.document.delete", "action": "delete", "resource_type": "document"},
         ("POST", "/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/reindex"): {"event": "kb.document.reindex", "action": "update", "resource_type": "document"},
         ("POST", "/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/chunk"): {"event": "kb.document.chunk", "action": "update", "resource_type": "document"},
@@ -61,6 +68,19 @@ def route_meta(method: str, path_template: str) -> dict[str, str]:
         ("GET", "/api/v1/admin/tasks/batches/{batch_id}"): {"event": "kb.task.batch.read", "action": "read", "resource_type": "task_batch"},
         ("POST", "/api/v1/admin/tasks/batches/{batch_id}/retry-failed"): {"event": "kb.task.batch.retry", "action": "retry", "resource_type": "task_batch"},
         ("PUT", "/api/v1/admin/system/upload-settings"): {"event": "kb.setting.upload.update", "action": "update", "resource_type": "setting"},
+        ("GET", "/api/v1/admin/system/cross-store-repairs"): {"event": "kb.cross_store_repair.list", "action": "read", "resource_type": "cross_store_repair"},
+        ("GET", "/api/v1/admin/system/cross-store-repairs/stats"): {"event": "kb.cross_store_repair.stats", "action": "read", "resource_type": "cross_store_repair"},
+        ("GET", "/api/v1/admin/system/cross-store-repairs/metrics"): {"event": "kb.cross_store_repair.metrics", "action": "read", "resource_type": "cross_store_repair"},
+        ("GET", "/api/v1/admin/system/object-storage/health"): {"event": "kb.object_storage.health", "action": "read", "resource_type": "object_storage"},
+        ("POST", "/api/v1/internal/alerts/alertmanager"): {"event": "system.alertmanager.receive", "action": "receive", "resource_type": "alert"},
+        ("POST", "/api/v1/admin/system/cross-store-repairs/execute"): {"event": "kb.cross_store_repair.execute", "action": "repair", "resource_type": "cross_store_repair"},
+        ("GET", "/api/v1/admin/system/risk/overview"): {"event": "kb.risk.overview", "action": "read", "resource_type": "risk"},
+        ("GET", "/api/v1/admin/system/risk/rules"): {"event": "kb.risk.rules.read", "action": "read", "resource_type": "risk_rule"},
+        ("PATCH", "/api/v1/admin/system/risk/rules"): {"event": "kb.risk.rules.update", "action": "update", "resource_type": "risk_rule"},
+        ("GET", "/api/v1/admin/system/risk/events"): {"event": "kb.risk.events.read", "action": "read", "resource_type": "risk_event"},
+        ("GET", "/api/v1/admin/system/risk/events/stats"): {"event": "kb.risk.events.stats", "action": "read", "resource_type": "risk_event"},
+        ("POST", "/api/v1/admin/system/risk/events/{event_id}/ack"): {"event": "kb.risk.event.ack", "action": "update", "resource_type": "risk_event"},
+        ("POST", "/api/v1/admin/system/risk/events/{event_id}/resolve"): {"event": "kb.risk.event.resolve", "action": "update", "resource_type": "risk_event"},
     }
     return mapping.get((method.upper(), path_template), {"event": "kb.api.call", "action": "call", "resource_type": "api"})
 
@@ -91,7 +111,7 @@ def summarize_query(query_string: str) -> str:
     if not query_string:
         return "-"
     parsed = parse_qs(query_string, keep_blank_values=False)
-    allow = {"kb_id", "doc_id", "task_id", "limit", "top_k"}
+    allow = {"kb_id", "doc_id", "task_id", "secret_id", "limit", "top_k"}
     out: dict[str, str] = {}
     for key in allow:
         values = parsed.get(key)
@@ -132,6 +152,10 @@ async def summarize_body(request: Request, path_template: str, max_inspect_bytes
     summary: dict[str, object] = {"kind": "json", "keys": keys, "content_length": len(raw)}
     if path_template == "/api/v1/admin/auth/login":
         summary["username_hash"] = _hash12(str(data.get("username", "")))
+    elif path_template.startswith("/api/v1/admin/workflow-secrets"):
+        summary["name_hash"] = _hash12(str(data.get("name", ""))) if data.get("name") else "-"
+        summary["value_present"] = bool(data.get("value"))
+        summary["description_len"] = len(str(data.get("description", "")))
     elif path_template in {"/api/v1/admin/kbs", "/api/v1/admin/kbs/{kb_id}"}:
         name = str(data.get("name", ""))
         summary["name_len"] = len(name)

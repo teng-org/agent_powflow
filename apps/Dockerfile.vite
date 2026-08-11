@@ -1,0 +1,12 @@
+FROM node:20-bookworm-slim
+
+ARG APP_DIR
+WORKDIR /app
+
+COPY ${APP_DIR}/package*.json ./
+RUN npm ci
+
+COPY ${APP_DIR}/ ./
+
+ENV HOST=0.0.0.0
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

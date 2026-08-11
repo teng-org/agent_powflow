@@ -1,0 +1,5 @@
+ALTER TABLE knowledge_bases
+    ADD COLUMN IF NOT EXISTS description VARCHAR(1000) NOT NULL DEFAULT '';
+
+ALTER TABLE knowledge_bases
+    ADD COLUMN IF NOT EXISTS tags_json TEXT NOT NULL DEFAULT '[]';

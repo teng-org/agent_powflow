@@ -2,6 +2,8 @@
   "default_endpoint_id": "chat-llm-default",
   "default_endpoint_ids": {
     "chat_llm": "chat-llm-default",
+    "chat_aux": "chat-llm-default",
+    "chat_summary": "chat-llm-default",
     "chat_embedding": "chat-embedding-default"
   },
   "endpoints": [

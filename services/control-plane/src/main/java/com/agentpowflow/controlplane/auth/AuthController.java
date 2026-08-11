@@ -2,6 +2,8 @@ package com.agentpowflow.controlplane.auth;
 
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.security.core.Authentication;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -29,6 +31,7 @@ public class AuthController {
     public LoginResponse register(@RequestBody RegisterRequest body) {
         IdentityService.AuthResult result = identityService.register(
                 body.tenantCode(),
+                body.workspaceName(),
                 body.email(),
                 body.password(),
                 body.displayName()
@@ -37,16 +40,27 @@ public class AuthController {
     }
 
     @PostMapping("/auth/login")
-    public LoginResponse login(@RequestBody LoginRequest body) {
+    public ResponseEntity<?> login(@RequestBody LoginRequest body) {
         String identity = body.email() != null && !body.email().isBlank() ? body.email() : body.username();
-        IdentityService.AuthResult result = identityService.login(body.tenantCode(), identity, body.password());
-        return toLoginResponse(result);
+        try {
+            IdentityService.AuthResult result = identityService.login(body.tenantCode(), identity, body.password());
+            return ResponseEntity.ok(toLoginResponse(result));
+        } catch (IdentityService.WorkspaceSelectionRequiredException ex) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(new WorkspaceSelectionResponse(
+                    "workspace_selection_required",
+                    "WORKSPACE_SELECTION_REQUIRED",
+                    "请选择要进入的工作空间",
+                    ex.candidates()
+            ));
+        }
     }
 
     @PostMapping("/auth/refresh")
     public RefreshResponse refresh(@RequestBody RefreshRequest body) {
         IdentityService.AuthResult result = identityService.refresh(body.refreshToken());
-        return new RefreshResponse("ok", result.accessToken(), result.tokenType(), result.expiresIn());
+        return new RefreshResponse(
+                "ok", result.accessToken(), result.refreshToken(), result.tokenType(), result.expiresIn()
+        );
     }
 
     @PostMapping("/auth/logout")
@@ -102,6 +116,7 @@ public class AuthController {
                 result.expiresIn(),
                 role,
                 result.tenantId(),
+                result.tenantCode(),
                 result.actorId(),
                 result.roles()
         );
@@ -109,6 +124,7 @@ public class AuthController {
 
     public record RegisterRequest(
             @NotBlank String tenantCode,
+            String workspaceName,
             @NotBlank String email,
             @NotBlank String password,
             String displayName
@@ -146,17 +162,26 @@ public class AuthController {
             long expiresIn,
             String role,
             String tenantId,
+            String tenantCode,
             String actorId,
             List<String> roles
+    ) {
+    }
+
+    public record WorkspaceSelectionResponse(
+            String status,
+            String code,
+            String message,
+            List<IdentityService.WorkspaceCandidate> items
     ) {
     }
 
     public record RefreshResponse(
             String status,
             String accessToken,
+            String refreshToken,
             String tokenType,
             long expiresIn
     ) {
     }
 }
-

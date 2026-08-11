@@ -6,11 +6,21 @@ spring:
     username: ${SPRING_DATASOURCE_USERNAME:apf}
     password: ${SPRING_DATASOURCE_PASSWORD:apf}
   jpa:
+    open-in-view: false
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
     properties:
       hibernate:
         format_sql: true
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: 0
+    validate-on-migrate: true
+  servlet:
+    multipart:
+      max-file-size: ${CONTROL_PLANE_UPLOAD_MAX_FILE_BYTES:52428800}
+      max-request-size: ${CONTROL_PLANE_UPLOAD_MAX_BATCH_BYTES:209715200}
 
 management:
   endpoints:
@@ -22,11 +32,68 @@ server:
   port: ${CONTROL_PLANE_PORT:8080}
 
 control-plane:
+  approvals:
+    timeout-scan-enabled: ${CONTROL_APPROVAL_TIMEOUT_SCAN_ENABLED:true}
+    timeout-scan-ms: ${CONTROL_APPROVAL_TIMEOUT_SCAN_MS:5000}
+  approval-alerts:
+    evaluation-enabled: ${CONTROL_APPROVAL_ALERT_EVALUATION_ENABLED:true}
+    evaluation-interval-ms: ${CONTROL_APPROVAL_ALERT_EVALUATION_INTERVAL_MS:15000}
+    due-soon-seconds: ${CONTROL_APPROVAL_ALERT_DUE_SOON_SECONDS:900}
+    webhook-url: ${CONTROL_APPROVAL_ALERT_WEBHOOK_URL:}
+    allowed-hosts: ${CONTROL_APPROVAL_ALERT_ALLOWED_HOSTS:}
+    allow-http: ${CONTROL_APPROVAL_ALERT_ALLOW_HTTP:false}
+    allow-private-network: ${CONTROL_APPROVAL_ALERT_ALLOW_PRIVATE_NETWORK:false}
+    delivery-enabled: ${CONTROL_APPROVAL_ALERT_DELIVERY_ENABLED:true}
+    delivery-interval-ms: ${CONTROL_APPROVAL_ALERT_DELIVERY_INTERVAL_MS:1000}
+    delivery-batch-size: ${CONTROL_APPROVAL_ALERT_DELIVERY_BATCH_SIZE:20}
+    max-attempts: ${CONTROL_APPROVAL_ALERT_MAX_ATTEMPTS:8}
+    claim-seconds: ${CONTROL_APPROVAL_ALERT_CLAIM_SECONDS:30}
+    retry-base-seconds: ${CONTROL_APPROVAL_ALERT_RETRY_BASE_SECONDS:5}
+    retry-max-seconds: ${CONTROL_APPROVAL_ALERT_RETRY_MAX_SECONDS:900}
+    request-timeout-ms: ${CONTROL_APPROVAL_ALERT_REQUEST_TIMEOUT_MS:5000}
+  internal-api:
+    token: ${CONTROL_PLANE_INTERNAL_TOKEN:change-me-in-production}
+    chat-base-url: ${CHAT_INTERNAL_BASE_URL:http://localhost:8092}
+    chat-request-timeout-ms: ${CONTROL_AGENT_CHAT_TIMEOUT_MS:180000}
+  execution-dispatch:
+    enabled: ${CONTROL_PLANE_EXECUTION_DISPATCH_ENABLED:true}
+    url: ${EXECUTION_INTERNAL_DISPATCH_URL:http://localhost:8090/api/v1/internal/control-runs/dispatch}
+    interval-ms: ${CONTROL_PLANE_EXECUTION_DISPATCH_INTERVAL_MS:1000}
+    batch-size: ${CONTROL_PLANE_EXECUTION_DISPATCH_BATCH_SIZE:20}
+    max-attempts: ${CONTROL_PLANE_EXECUTION_DISPATCH_MAX_ATTEMPTS:8}
+    claim-seconds: ${CONTROL_PLANE_EXECUTION_DISPATCH_CLAIM_SECONDS:30}
+    retry-base-seconds: ${CONTROL_PLANE_EXECUTION_DISPATCH_RETRY_BASE_SECONDS:1}
+    retry-max-seconds: ${CONTROL_PLANE_EXECUTION_DISPATCH_RETRY_MAX_SECONDS:300}
+  knowledge:
+    execution-base-url: ${EXECUTION_INTERNAL_BASE_URL:http://localhost:8090}
+    request-timeout-ms: ${CONTROL_KNOWLEDGE_REQUEST_TIMEOUT_MS:10000}
+  task-dispatch:
+    enabled: ${CONTROL_PLANE_TASK_DISPATCH_ENABLED:true}
+    interval-ms: ${CONTROL_PLANE_TASK_DISPATCH_INTERVAL_MS:1000}
+    batch-size: ${CONTROL_PLANE_TASK_DISPATCH_BATCH_SIZE:20}
+    max-attempts: ${CONTROL_PLANE_TASK_DISPATCH_MAX_ATTEMPTS:8}
+    claim-seconds: ${CONTROL_PLANE_TASK_DISPATCH_CLAIM_SECONDS:30}
+    retry-base-seconds: ${CONTROL_PLANE_TASK_DISPATCH_RETRY_BASE_SECONDS:1}
+    retry-max-seconds: ${CONTROL_PLANE_TASK_DISPATCH_RETRY_MAX_SECONDS:300}
+    max-text-bytes: ${CONTROL_PLANE_TASK_DISPATCH_MAX_TEXT_BYTES:10485760}
+    max-upload-files: ${CONTROL_PLANE_UPLOAD_MAX_FILES:20}
+    max-upload-file-bytes: ${CONTROL_PLANE_UPLOAD_MAX_FILE_BYTES:52428800}
+    max-upload-batch-bytes: ${CONTROL_PLANE_UPLOAD_MAX_BATCH_BYTES:209715200}
+    upload-intent-timeout-seconds: ${CONTROL_PLANE_UPLOAD_INTENT_TIMEOUT_SECONDS:600}
+  execution-lease:
+    duration-seconds: ${CONTROL_PLANE_EXECUTION_LEASE_DURATION_SECONDS:30}
+    heartbeat-seconds: ${CONTROL_PLANE_EXECUTION_LEASE_HEARTBEAT_SECONDS:10}
   auth:
     admin-username: ${CONTROL_PLANE_ADMIN_USERNAME:${EXECUTION_ADMIN_USERNAME:admin}}
     admin-password: ${CONTROL_PLANE_ADMIN_PASSWORD:${EXECUTION_ADMIN_PASSWORD:admin123}}
     admin-role: ${CONTROL_PLANE_ADMIN_ROLE:${EXECUTION_ADMIN_ROLE:PLATFORM_ADMIN}}
     admin-tenant-id: ${CONTROL_PLANE_ADMIN_TENANT_ID:platform}
-    jwt-secret: ${CONTROL_PLANE_JWT_SECRET:${EXECUTION_JWT_SECRET:change-me-in-production}}
+    jwt-secret: ${CONTROL_PLANE_JWT_SECRET:change-me-control-in-production}
+    jwt-key-id: ${CONTROL_PLANE_JWT_KEY_ID:control-dev-primary}
+    jwt-previous-keys: ${CONTROL_PLANE_JWT_PREVIOUS_KEYS:}
+    jwt-previous-keys-expires-at: ${CONTROL_PLANE_JWT_PREVIOUS_KEYS_EXPIRES_AT:}
+    jwt-legacy-accept-until: ${CONTROL_PLANE_JWT_LEGACY_ACCEPT_UNTIL:}
+    jwt-issuer: agentpowflow-control
+    jwt-audience: control-plane
     access-ttl-seconds: ${CONTROL_PLANE_ACCESS_TTL_SECONDS:${EXECUTION_JWT_TTL_SECONDS:43200}}
     refresh-ttl-seconds: ${CONTROL_PLANE_REFRESH_TTL_SECONDS:604800}

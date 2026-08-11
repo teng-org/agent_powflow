@@ -8,7 +8,9 @@ public record TokenClaims(
         List<String> roles,
         String tokenType,
         long iat,
-        long exp
+        long exp,
+        String keyId,
+        String keySlot,
+        boolean legacyFormat
 ) {
 }
-

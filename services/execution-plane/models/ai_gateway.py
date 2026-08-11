@@ -1,8 +1,9 @@
 import hashlib
 import json
 import math
-import os
 import re
+import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
@@ -36,25 +37,13 @@ class AiGateway:
     def __init__(self) -> None:
         self._bootstrapped = False
         self._runtime_config_cache: dict[str, Any] = {}
-        self._runtime_config_mtime: float = -1.0
-        self.main_pool_config = os.getenv(
-            "API_POOL_DEFAULT_CONFIG",
-            "/app/services/execution-plane/config/api_pool.default.json",
-        )
-        self.aux_pool_config = os.getenv(
-            "AUX_API_POOL_DEFAULT_CONFIG",
-            "/app/services/execution-plane/config/aux_api_pool.default.json",
-        )
-        self.runtime_config_path = os.getenv(
-            "RUNTIME_CONFIG_PATH",
-            "/app/config/runtime-config.json",
-        )
+        self._runtime_config_signature: tuple[float, float] = (-1.0, -1.0)
 
     def _ensure_bootstrap(self) -> None:
         if self._bootstrapped:
             return
-        api_pool_manager.bootstrap(os.path.abspath(self.main_pool_config))
-        aux_api_pool_manager.bootstrap(os.path.abspath(self.aux_pool_config))
+        api_pool_manager.bootstrap()
+        aux_api_pool_manager.bootstrap()
         self._bootstrapped = True
 
     def _manager(self, pool: str):
@@ -63,6 +52,10 @@ class AiGateway:
     def _resolve_endpoint(self, tenant_id: str, pool: str, task: str) -> ApiEndpoint | None:
         self._ensure_bootstrap()
         return self._manager(pool).get_default_for_tenant(tenant_id=tenant_id, task=task)
+
+    def _candidate_endpoints(self, tenant_id: str, pool: str, task: str) -> list[ApiEndpoint]:
+        self._ensure_bootstrap()
+        return self._manager(pool).list_candidates_for_tenant(tenant_id=tenant_id, task=task)
 
     def _resolve_embedding_endpoint(self, tenant_id: str, pool: str, task: str) -> ApiEndpoint | None:
         """
@@ -106,6 +99,29 @@ class AiGateway:
                 return endpoint
         return None
 
+    def _resolve_embedding_candidates(self, tenant_id: str, pool: str, task: str) -> list[ApiEndpoint]:
+        tried: list[str] = []
+        candidates: list[ApiEndpoint] = []
+
+        def _add(t: str) -> None:
+            if not t or t in tried:
+                return
+            tried.append(t)
+            for endpoint in self._candidate_endpoints(tenant_id=tenant_id, pool=pool, task=t):
+                if endpoint.endpoint_id not in {e.endpoint_id for e in candidates}:
+                    candidates.append(endpoint)
+
+        _add((task or "").strip())
+        if pool == "main":
+            for alias in ["embedding", "doc_embedding", "chunk_embedding", "chunk_commit_embedding", "reindex_embedding"]:
+                _add(alias)
+        elif pool == "aux":
+            for alias in ["summary_embedding", "embedding"]:
+                _add(alias)
+        else:
+            _add("embedding")
+        return candidates
+
     def _local_embedding(self, text: str, dimensions: int = 256) -> list[float]:
         vec = [0.0] * dimensions
         tokens = [t for t in (text or "").lower().split() if t]
@@ -118,45 +134,8 @@ class AiGateway:
         norm = math.sqrt(sum(v * v for v in vec)) or 1.0
         return [v / norm for v in vec]
 
-    def _load_runtime_config(self) -> dict[str, Any]:
-        path_candidates = [
-            self.runtime_config_path,
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../config/runtime-config.json")),
-        ]
-        target = ""
-        for p in path_candidates:
-            if p and os.path.exists(p):
-                target = p
-                break
-        if not target:
-            return {}
-        try:
-            mtime = os.path.getmtime(target)
-        except OSError:
-            return {}
-        if self._runtime_config_cache and self._runtime_config_mtime == mtime:
-            return self._runtime_config_cache
-        try:
-            with open(target, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self._runtime_config_cache = data if isinstance(data, dict) else {}
-            self._runtime_config_mtime = mtime
-            return self._runtime_config_cache
-        except Exception:
-            # Avoid noisy failures in hot paths; return stale cache if available.
-            return self._runtime_config_cache
-
-    def _runtime_key(self, *keys: str) -> str:
-        conf = self._load_runtime_config()
-        for key in keys:
-            value = str(conf.get(key, "") or "").strip()
-            if value:
-                return value
-        return ""
-
     def _runtime_int(self, key: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
-        conf = self._load_runtime_config()
-        raw = conf.get(key, default)
+        raw = default
         try:
             value = int(raw)
         except Exception:
@@ -168,8 +147,7 @@ class AiGateway:
         return value
 
     def _runtime_bool(self, key: str, default: bool = False) -> bool:
-        conf = self._load_runtime_config()
-        raw = conf.get(key, default)
+        raw = default
         if isinstance(raw, bool):
             return raw
         text = str(raw or "").strip().lower()
@@ -180,31 +158,20 @@ class AiGateway:
         return bool(default)
 
     def _endpoint_api_key(self, endpoint: ApiEndpoint) -> str:
-        if endpoint.api_key:
-            return endpoint.api_key
-        provider = (endpoint.provider or "").strip().lower()
-        base_url = (endpoint.base_url or "").strip().lower()
-        # Runtime config is the primary source for API keys.
-        if provider == "siliconflow":
-            return self._runtime_key("siliconflow_api_key", "embedding_api_key")
-        if provider == "openai":
-            return self._runtime_key("openai_api_key")
-        if provider == "openai_compatible":
-            if "siliconflow.cn" in base_url:
-                return self._runtime_key("siliconflow_api_key", "openai_api_key")
-            return self._runtime_key("openai_api_key", "siliconflow_api_key")
-        # Backward-compatible env fallback.
-        if endpoint.provider == "siliconflow":
-            return os.getenv("SILICONFLOW_API_KEY", "")
-        if endpoint.provider in {"openai", "openai_compatible"}:
-            return os.getenv("OPENAI_API_KEY", "")
-        return ""
+        return (endpoint.api_key or "").strip()
 
     def _api_key_fingerprint(self, api_key: str) -> str:
         key = (api_key or "").strip()
         if not key:
             return "none"
         return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]  # nosec B324
+
+    def _endpoint_url(self, endpoint: ApiEndpoint, path: str) -> str:
+        base = (endpoint.base_url or "").strip().rstrip("/")
+        suffix = "/" + path.strip("/")
+        if base.lower().endswith(suffix.lower()):
+            return base
+        return base + suffix
 
     def _parse_usage_tokens(self, body: dict[str, Any]) -> dict[str, int]:
         usage = body.get("usage") if isinstance(body, dict) else {}
@@ -236,20 +203,8 @@ class AiGateway:
         except Exception:
             endpoint_in_rate = 0.0
             endpoint_out_rate = 0.0
-        conf = self._load_runtime_config()
-        pricing = conf.get("api_model_pricing", {})
         in_rate = endpoint_in_rate
         out_rate = endpoint_out_rate
-        if in_rate <= 0.0 and out_rate <= 0.0 and isinstance(pricing, dict):
-            model_key = str(getattr(endpoint, "model", "") or "").strip()
-            item = pricing.get(model_key) or pricing.get("*")
-            if isinstance(item, dict):
-                try:
-                    in_rate = float(item.get("input_per_1k", 0.0) or 0.0)
-                    out_rate = float(item.get("output_per_1k", 0.0) or 0.0)
-                except Exception:
-                    in_rate = 0.0
-                    out_rate = 0.0
         input_tokens = max(0, int(usage_tokens.get("input_tokens", 0) or 0))
         output_tokens = max(0, int(usage_tokens.get("output_tokens", 0) or 0))
         cost = (input_tokens / 1000.0) * in_rate + (output_tokens / 1000.0) * out_rate
@@ -323,45 +278,55 @@ class AiGateway:
             wait_seconds=slot_wait,
             ttl_seconds=slot_ttl,
         )
-        url = endpoint.base_url.rstrip("/") + "/embeddings"
+        url = self._endpoint_url(endpoint, "/embeddings")
         payload = {
             "model": endpoint.model,
             "input": text,
             "encoding_format": "float",
         }
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        timeout_seconds = float(max(5, min(int(endpoint.timeout_seconds or 120), 600)))
+        retry_max = max(0, min(int(endpoint.retry_max or 0), 5))
+        body: dict[str, Any] = {}
         try:
-            with httpx.Client(timeout=40.0) as client:
-                resp = client.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-                body = resp.json()
-            self._record_api_usage(
-                tenant_id=tenant_id,
-                kb_id=kb_id,
-                doc_id=doc_id,
-                pool=pool,
-                task_category=task_category,
-                endpoint=endpoint,
-                api_key=api_key,
-                api_path="/embeddings",
-                success=True,
-                usage_tokens=self._parse_usage_tokens(body),
-            )
-        except Exception as exc:
-            self._record_api_usage(
-                tenant_id=tenant_id,
-                kb_id=kb_id,
-                doc_id=doc_id,
-                pool=pool,
-                task_category=task_category,
-                endpoint=endpoint,
-                api_key=api_key,
-                api_path="/embeddings",
-                success=False,
-                usage_tokens={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                error_reason=str(exc),
-            )
-            raise
+            for attempt in range(retry_max + 1):
+                try:
+                    with httpx.Client(timeout=timeout_seconds) as client:
+                        resp = client.post(url, json=payload, headers=headers)
+                        resp.raise_for_status()
+                        body = resp.json()
+                    self._record_api_usage(
+                        tenant_id=tenant_id,
+                        kb_id=kb_id,
+                        doc_id=doc_id,
+                        pool=pool,
+                        task_category=task_category,
+                        endpoint=endpoint,
+                        api_key=api_key,
+                        api_path="/embeddings",
+                        success=True,
+                        usage_tokens=self._parse_usage_tokens(body),
+                    )
+                    break
+                except Exception as exc:
+                    self._record_api_usage(
+                        tenant_id=tenant_id,
+                        kb_id=kb_id,
+                        doc_id=doc_id,
+                        pool=pool,
+                        task_category=task_category,
+                        endpoint=endpoint,
+                        api_key=api_key,
+                        api_path="/embeddings",
+                        success=False,
+                        usage_tokens={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                        error_reason=str(exc),
+                    )
+                    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                    retryable = status is None or status == 429 or status >= 500
+                    if attempt >= retry_max or not retryable:
+                        raise
+                    time.sleep(min(0.25 * (2 ** attempt), 2.0))
         finally:
             kb_store.release_api_request_slot(endpoint_id=endpoint_slot_id, slot_no=slot_no, holder_id=slot_holder)
         data = body.get("data", [])
@@ -384,27 +349,29 @@ class AiGateway:
         kb_id: str = "",
         doc_id: str = "",
     ) -> list[float]:
-        endpoint = self._resolve_embedding_endpoint(tenant_id=tenant_id, pool=pool, task=task)
-        if not endpoint or not endpoint.enabled:
-            if strict:
-                raise RuntimeError(f"No endpoint configured for pool={pool}, task={task}")
-            return self._local_embedding(text, local_dimensions)
-        try:
-            if endpoint.provider in {"siliconflow", "openai", "openai_compatible"}:
-                return self._embed_openai_compatible(
-                    endpoint,
-                    text,
-                    tenant_id=tenant_id,
-                    kb_id=kb_id,
-                    doc_id=doc_id,
-                    pool=pool,
-                    task_category=task,
-                )
-            raise RuntimeError(f"Unsupported embedding provider: {endpoint.provider}")
-        except Exception:
-            if strict:
-                raise
-            return self._local_embedding(text, local_dimensions)
+        endpoints = self._resolve_embedding_candidates(tenant_id=tenant_id, pool=pool, task=task)
+        if not endpoints:
+            raise RuntimeError(f"No endpoint configured for pool={pool}, task={task}")
+        errors: list[str] = []
+        last_endpoint = endpoints[0]
+        for endpoint in endpoints:
+            last_endpoint = endpoint
+            try:
+                if endpoint.provider in {"siliconflow", "openai", "openai_compatible"}:
+                    return self._embed_openai_compatible(
+                        endpoint,
+                        text,
+                        tenant_id=tenant_id,
+                        kb_id=kb_id,
+                        doc_id=doc_id,
+                        pool=pool,
+                        task_category=task,
+                    )
+                raise RuntimeError(f"Unsupported embedding provider: {endpoint.provider}")
+            except Exception as exc:
+                errors.append(f"{endpoint.endpoint_id}: {exc}")
+                continue
+        raise RuntimeError("; ".join(errors) or f"Embedding failed via {last_endpoint.endpoint_id}")
 
     def _chat_openai_compatible(
         self,
@@ -418,6 +385,8 @@ class AiGateway:
         task_category: str,
         temperature: float = 0.2,
         max_tokens: int = 600,
+        idempotency_key: str = "",
+        should_cancel: Callable[[], bool] | None = None,
     ) -> str:
         api_key = self._endpoint_api_key(endpoint)
         if not api_key:
@@ -436,7 +405,7 @@ class AiGateway:
             wait_seconds=slot_wait,
             ttl_seconds=slot_ttl,
         )
-        url = endpoint.base_url.rstrip("/") + "/chat/completions"
+        url = self._endpoint_url(endpoint, "/chat/completions")
         payload = {
             "model": endpoint.model,
             "messages": messages,
@@ -445,11 +414,16 @@ class AiGateway:
             "response_format": {"type": "json_object"},
         }
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
         try:
-            with httpx.Client(timeout=60.0) as client:
-                resp = client.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-                body = resp.json()
+            body = self._post_json_interruptible(
+                url=url,
+                payload=payload,
+                headers=headers,
+                timeout_seconds=60.0,
+                should_cancel=should_cancel,
+            )
             self._record_api_usage(
                 tenant_id=tenant_id,
                 kb_id=kb_id,
@@ -499,59 +473,119 @@ class AiGateway:
         max_tokens: int = 600,
         kb_id: str = "",
         doc_id: str = "",
+        idempotency_key: str = "",
+        should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        endpoint = self._resolve_endpoint(tenant_id=tenant_id, pool=pool, task=task)
-        if not endpoint or not endpoint.enabled:
+        endpoints = self._candidate_endpoints(tenant_id=tenant_id, pool=pool, task=task)
+        if not endpoints:
             if strict:
                 raise RuntimeError(f"No endpoint configured for pool={pool}, task={task}")
             return {
                 "text": "",
                 "endpoint": {"endpoint_id": "none", "provider": "none", "model": "none"},
             }
-        if endpoint.provider == "mock":
-            if strict:
-                raise RuntimeError("mock endpoint is disabled in strict mode")
-            return {
-                "text": json.dumps({"overview": "mock overview", "summary": "mock summary"}, ensure_ascii=False),
-                "endpoint": {
-                    "endpoint_id": endpoint.endpoint_id,
-                    "provider": endpoint.provider,
-                    "model": endpoint.model,
-                },
-            }
-        try:
-            if endpoint.provider in {"siliconflow", "openai", "openai_compatible"}:
-                text = self._chat_openai_compatible(
-                    endpoint=endpoint,
-                    messages=messages,
-                    tenant_id=tenant_id,
-                    kb_id=kb_id,
-                    doc_id=doc_id,
-                    pool=pool,
-                    task_category=task,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+        errors: list[str] = []
+        for endpoint in endpoints:
+            if endpoint.provider == "mock":
+                if strict:
+                    errors.append(f"{endpoint.endpoint_id}: mock endpoint is disabled in strict mode")
+                    continue
                 return {
-                    "text": text,
+                    "text": json.dumps({"overview": "mock overview", "summary": "mock summary"}, ensure_ascii=False),
                     "endpoint": {
                         "endpoint_id": endpoint.endpoint_id,
                         "provider": endpoint.provider,
                         "model": endpoint.model,
                     },
                 }
-            raise RuntimeError(f"Unsupported LLM provider: {endpoint.provider}")
-        except Exception:
-            if strict:
-                raise
-            return {
-                "text": "",
-                "endpoint": {
-                    "endpoint_id": endpoint.endpoint_id,
-                    "provider": endpoint.provider,
-                    "model": endpoint.model,
-                },
-            }
+            try:
+                if endpoint.provider in {"siliconflow", "openai", "openai_compatible"}:
+                    text = self._chat_openai_compatible(
+                        endpoint=endpoint,
+                        messages=messages,
+                        tenant_id=tenant_id,
+                        kb_id=kb_id,
+                        doc_id=doc_id,
+                        pool=pool,
+                        task_category=task,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        idempotency_key=idempotency_key,
+                        should_cancel=should_cancel,
+                    )
+                    return {
+                        "text": text,
+                        "endpoint": {
+                            "endpoint_id": endpoint.endpoint_id,
+                            "provider": endpoint.provider,
+                            "model": endpoint.model,
+                        },
+                    }
+                raise RuntimeError(f"Unsupported LLM provider: {endpoint.provider}")
+            except Exception as exc:
+                if str(exc) == "TASK_CANCELLED" or (should_cancel and should_cancel()):
+                    raise RuntimeError("TASK_CANCELLED") from exc
+                errors.append(f"{endpoint.endpoint_id}: {exc}")
+                continue
+        if strict:
+            raise RuntimeError("; ".join(errors) or f"LLM failed for pool={pool}, task={task}")
+        endpoint = endpoints[-1]
+        return {
+            "text": "",
+            "endpoint": {
+                "endpoint_id": endpoint.endpoint_id,
+                "provider": endpoint.provider,
+                "model": endpoint.model,
+            },
+        }
+
+    def _post_json_interruptible(
+        self,
+        *,
+        url: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        timeout_seconds: float,
+        should_cancel: Callable[[], bool] | None,
+    ) -> dict[str, Any]:
+        if should_cancel and should_cancel():
+            raise RuntimeError("TASK_CANCELLED")
+        client = httpx.Client(timeout=timeout_seconds)
+        stop = threading.Event()
+        cancelled = threading.Event()
+
+        def _watch_cancel() -> None:
+            while not stop.wait(0.1):
+                try:
+                    if should_cancel and should_cancel():
+                        cancelled.set()
+                        client.close()
+                        return
+                except Exception:
+                    continue
+
+        watcher = None
+        if should_cancel:
+            watcher = threading.Thread(target=_watch_cancel, name="provider-cancel-watch", daemon=True)
+            watcher.start()
+        try:
+            response = client.post(url, json=payload, headers=headers)
+            if cancelled.is_set() or (should_cancel and should_cancel()):
+                raise RuntimeError("TASK_CANCELLED")
+            response.raise_for_status()
+            body = response.json()
+            if not isinstance(body, dict):
+                raise ValueError("Provider returned a non-object JSON response")
+            return body
+        except Exception as exc:
+            if cancelled.is_set() or (should_cancel and should_cancel()):
+                raise RuntimeError("TASK_CANCELLED") from exc
+            raise
+        finally:
+            stop.set()
+            if watcher is not None:
+                watcher.join(timeout=1.0)
+            client.close()
 
     def _extract_json(self, raw: str) -> dict[str, Any]:
         text = (raw or "").strip()

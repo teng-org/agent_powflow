@@ -32,6 +32,42 @@
   - `memory_session_fusion_hybrid_bonus` / `memory_session_fusion_recency_half_life_days`
   - `chat_session_vector_collection` / `chat_session_vector_timeout_seconds`
 
+## PostgreSQL schema migrations
+
+PostgreSQL-backed deployments must provide `POSTGRES_DSN` (or
+`CHAT_HISTORY_POSTGRES_DSN`). The container runs the explicit V1/V2 migration
+sequence before Uvicorn starts. Business stores validate the migration ledger
+and never create or alter tables.
+
+```powershell
+$env:POSTGRES_DSN = 'postgresql://apf:apf@localhost:5432/agentpowflow'
+python -m runtime.schema_migrations
+```
+
+Missing, incomplete, newer, or checksum-drifted schemas fail closed. See
+`docs/design/chat-postgresql-schema-migrations-v1.zh-CN.md` for upgrade,
+rollback, shared-schema, and integration-test details.
+
+## Stream lifecycle
+
+- Active cancellation transitions `RUNNING -> CANCELLING -> CANCELLED` and interrupts the local provider task without waiting for another token.
+- Terminal runs cannot be cancelled or overwritten by late results.
+- Stream and fallback provider failure marks the run `FAILED`.
+- Client disconnect cancels server-side work and persists no partial assistant message.
+- Concurrent streams use request-local event emitters and cannot cross-deliver events.
+
+Provider retry defaults are `chat_request_retry_max=2`,
+`chat_stream_retry_max=2`, `chat_provider_retry_initial_ms=250`, and
+`chat_provider_retry_max_ms=5000`. Transient HTTP/transport failures retry;
+authentication failures do not. Numeric `Retry-After` is honored up to 60s.
+
+API Pool circuit breaking is strict: an endpoint is excluded throughout its OPEN window. After expiry it enters HALF_OPEN and admits exactly one probe; success closes the circuit, failure opens a fresh full window, and cancellation releases the probe claim. Probe claims are process-local and are cleared while restoring persisted state, so a restart cannot strand an endpoint in a false in-flight state. The selector never falls back to an actively open endpoint when all providers are unhealthy.
+
+Commercial-provider verification is intentionally separate from normal tests. `tools/provider_contract.py` requires explicit paid-call approval, an environment-only key, current provider prices and a per-run cost ceiling; see `docs/design/real-provider-contract-gate-v1.zh-CN.md`.
+
+Disconnect currently means cancellation, not stream resumption. See
+`docs/design/chat-sse-run-reliability-v1.zh-CN.md`.
+
 ## API
 
 - `POST /api/v1/chat/sessions`

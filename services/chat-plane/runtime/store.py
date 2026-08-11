@@ -17,6 +17,7 @@ except Exception:  # pragma: no cover
 
 from .config import get_setting
 from .models import ChatMessage, ChatRunState, ChatSession
+from .schema_migrations import SchemaMigrationError, require_database_current
 
 
 def utc_now_iso() -> str:
@@ -189,231 +190,19 @@ class ChatStore:
             return True
         if now - self._pg_schema_last_try_at < self._pg_schema_retry_seconds:
             return False
-        self._pg_schema_last_try_at = now
         try:
-            conn = self._pg_get_conn_locked()
-            if conn is None:
-                return False
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_history_store_snapshots (
-                      snapshot_id SMALLINT PRIMARY KEY,
-                      payload JSONB NOT NULL,
-                      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_sessions (
-                      session_id TEXT PRIMARY KEY,
-                      tenant_id TEXT NOT NULL,
-                      actor_id TEXT NOT NULL,
-                      title TEXT NOT NULL,
-                      kb_id TEXT NULL,
-                      created_at TIMESTAMPTZ NOT NULL,
-                      updated_at TIMESTAMPTZ NOT NULL
-                    )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_session_title_meta (
-                      session_id TEXT PRIMARY KEY REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
-                      attempt_count INTEGER NOT NULL DEFAULT 0,
-                      is_stable BOOLEAN NOT NULL DEFAULT FALSE,
-                      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_messages (
-                      message_id TEXT PRIMARY KEY,
-                      session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
-                      role TEXT NOT NULL,
-                      content TEXT NOT NULL,
-                      created_at TIMESTAMPTZ NOT NULL
-                    )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_session_memory (
-                      session_id TEXT PRIMARY KEY REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
-                      short_summary TEXT NOT NULL DEFAULT '',
-                      long_summary TEXT NOT NULL DEFAULT '',
-                      updated_at TIMESTAMPTZ NOT NULL
-                    )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_user_profiles (
-                      tenant_id TEXT NOT NULL,
-                      actor_id TEXT NOT NULL,
-                      profile_summary TEXT NOT NULL DEFAULT '',
-                      last_profile_message_at TIMESTAMPTZ NULL,
-                      updated_at TIMESTAMPTZ NOT NULL,
-                      PRIMARY KEY (tenant_id, actor_id)
-                    )
-                    """
-                )
-                cur.execute("ALTER TABLE chat_user_profiles ADD COLUMN IF NOT EXISTS last_profile_message_at TIMESTAMPTZ NULL")
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_memory_items (
-                      item_id TEXT PRIMARY KEY,
-                      session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
-                      text TEXT NOT NULL,
-                      importance DOUBLE PRECISION NOT NULL,
-                      kind TEXT NOT NULL,
-                      created_at TIMESTAMPTZ NOT NULL
-                    )
-                    """
-                )
-                cur.execute("ALTER TABLE chat_memory_items ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'conversation'")
-                cur.execute("ALTER TABLE chat_memory_items ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5")
-                cur.execute("ALTER TABLE chat_memory_items ADD COLUMN IF NOT EXISTS ttl_at TIMESTAMPTZ NULL")
-                cur.execute("ALTER TABLE chat_memory_items ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1")
-                cur.execute("ALTER TABLE chat_memory_items ADD COLUMN IF NOT EXISTS importance_v2 DOUBLE PRECISION NULL")
-                cur.execute("ALTER TABLE chat_memory_items ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ NULL")
-                cur.execute("ALTER TABLE chat_memory_items ADD COLUMN IF NOT EXISTS use_count INTEGER NOT NULL DEFAULT 0")
-                cur.execute("ALTER TABLE chat_memory_items ADD COLUMN IF NOT EXISTS conflict_state TEXT NOT NULL DEFAULT 'active'")
-                cur.execute("ALTER TABLE chat_memory_items ADD COLUMN IF NOT EXISTS shadowed_by_item_id TEXT NULL")
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_session_summaries (
-                      summary_id BIGSERIAL PRIMARY KEY,
-                      session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
-                      tenant_id TEXT NOT NULL,
-                      actor_id TEXT NOT NULL,
-                      summary_type TEXT NOT NULL,
-                      content TEXT NOT NULL,
-                      source_message_start_id TEXT NULL,
-                      source_message_end_id TEXT NULL,
-                      version INTEGER NOT NULL DEFAULT 1,
-                      is_current BOOLEAN NOT NULL DEFAULT TRUE,
-                      created_at TIMESTAMPTZ NOT NULL,
-                      updated_at TIMESTAMPTZ NOT NULL
-                    )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_user_recent_activities (
-                      activity_id TEXT PRIMARY KEY,
-                      tenant_id TEXT NOT NULL,
-                      actor_id TEXT NOT NULL,
-                      session_id TEXT NULL,
-                      activity_type TEXT NOT NULL,
-                      activity_text TEXT NOT NULL,
-                      importance DOUBLE PRECISION NOT NULL DEFAULT 0.5,
-                      ttl_at TIMESTAMPTZ NULL,
-                      created_at TIMESTAMPTZ NOT NULL,
-                      updated_at TIMESTAMPTZ NOT NULL
-                    )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_memory_fusion_logs (
-                      fusion_id TEXT PRIMARY KEY,
-                      run_id TEXT NOT NULL,
-                      session_id TEXT NOT NULL,
-                      tenant_id TEXT NOT NULL,
-                      actor_id TEXT NOT NULL,
-                      budget_total_tokens INTEGER NOT NULL,
-                      budget_used_tokens INTEGER NOT NULL,
-                      layer_stats JSONB NOT NULL,
-                      top_items JSONB NOT NULL,
-                      created_at TIMESTAMPTZ NOT NULL
-                    )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_session_segments (
-                      segment_id TEXT PRIMARY KEY,
-                      tenant_id TEXT NOT NULL,
-                      actor_id TEXT NOT NULL,
-                      session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
-                      source_message_ids TEXT[] NOT NULL,
-                      text_content TEXT NOT NULL,
-                      token_estimate INTEGER NOT NULL DEFAULT 0,
-                      keywords TEXT[] NULL,
-                      embedding_ref TEXT NULL,
-                      is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                      created_at TIMESTAMPTZ NOT NULL,
-                      updated_at TIMESTAMPTZ NOT NULL
-                    )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_runs (
-                      run_id TEXT PRIMARY KEY,
-                      session_id TEXT NOT NULL,
-                      tenant_id TEXT NOT NULL,
-                      actor_id TEXT NOT NULL,
-                      mode TEXT NOT NULL,
-                      status TEXT NOT NULL,
-                      stage TEXT NOT NULL,
-                      progress_current INTEGER NOT NULL DEFAULT 0,
-                      progress_total INTEGER NOT NULL DEFAULT 0,
-                      error_message TEXT NULL,
-                      started_at TIMESTAMPTZ NOT NULL,
-                      updated_at TIMESTAMPTZ NOT NULL,
-                      completed_at TIMESTAMPTZ NULL
-                    )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_memory_rerank_jobs (
-                      job_id TEXT PRIMARY KEY,
-                      session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
-                      tenant_id TEXT NOT NULL,
-                      actor_id TEXT NOT NULL,
-                      requested_by TEXT NOT NULL,
-                      request_limit INTEGER NOT NULL DEFAULT 200,
-                      status TEXT NOT NULL,
-                      result_json JSONB NULL,
-                      error_message TEXT NULL,
-                      created_at TIMESTAMPTZ NOT NULL,
-                      updated_at TIMESTAMPTZ NOT NULL,
-                      started_at TIMESTAMPTZ NULL,
-                      finished_at TIMESTAMPTZ NULL
-                    )
-                    """
-                )
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_sessions_tenant_actor_updated ON chat_sessions(tenant_id, actor_id, updated_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_session_title_meta_updated ON chat_session_title_meta(updated_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created ON chat_messages(session_id, created_at ASC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_memory_items_session_created ON chat_memory_items(session_id, created_at ASC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_memory_items_session_importance ON chat_memory_items(session_id, importance DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_memory_items_session_ttl ON chat_memory_items(session_id, ttl_at)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_memory_items_session_conflict ON chat_memory_items(session_id, conflict_state, created_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_session_summaries_session_current_updated ON chat_session_summaries(session_id, is_current, updated_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_session_summaries_tenant_actor_updated ON chat_session_summaries(tenant_id, actor_id, updated_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_user_recent_activities_tenant_actor_created ON chat_user_recent_activities(tenant_id, actor_id, created_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_user_recent_activities_ttl ON chat_user_recent_activities(ttl_at)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_memory_fusion_logs_tenant_actor_created ON chat_memory_fusion_logs(tenant_id, actor_id, created_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_memory_fusion_logs_session_created ON chat_memory_fusion_logs(session_id, created_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_session_segments_tenant_actor_updated ON chat_session_segments(tenant_id, actor_id, updated_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_session_segments_session_updated ON chat_session_segments(session_id, updated_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_session_segments_keywords_gin ON chat_session_segments USING GIN (keywords)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_runs_tenant_actor_updated ON chat_runs(tenant_id, actor_id, updated_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_memory_rerank_jobs_status_created ON chat_memory_rerank_jobs(status, created_at ASC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_memory_rerank_jobs_session_updated ON chat_memory_rerank_jobs(session_id, updated_at DESC)")
+            require_database_current(self._postgres_dsn)
             self._pg_schema_ready = True
             return True
+        except SchemaMigrationError:
+            # A missing, incomplete, newer or drifted schema is a deployment
+            # error. Never hide it behind the file fallback.
+            raise
         except Exception:
+            self._pg_schema_last_try_at = now
             self._pg_schema_ready = False
             self._pg_conn = None
             return False
-
     def _pg_get_conn_locked(self):
         if psycopg is None or not self._postgres_dsn:
             return None
@@ -3188,20 +2977,34 @@ class ChatStore:
             return run
 
     def complete_run(self, run_id: str, status: str, error_message: Optional[str] = None) -> Optional[ChatRunState]:
-        return self.update_run(
-            run_id,
-            status=status,
-            error_message=error_message,
-            completed_at=utc_now_iso(),
-        )
+        if status not in {"COMPLETED", "FAILED", "CANCELLED"}:
+            raise ValueError(f"invalid terminal run status: {status}")
+        with self._lock:
+            run = self._runs.get(run_id)
+            if not run:
+                return None
+            if run.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+                return run
+            now = utc_now_iso()
+            run.status = status
+            run.stage = status
+            run.error_message = error_message
+            run.completed_at = now
+            run.updated_at = now
+            self._runs[run_id] = run
+            self._upsert_run_to_postgres(run)
+            return run
 
     def cancel_run(self, run_id: str) -> bool:
         with self._lock:
             if run_id not in self._runs:
                 return False
-            self._cancel_flags[run_id] = True
             run = self._runs[run_id]
+            if run.status != "RUNNING":
+                return False
+            self._cancel_flags[run_id] = True
             run.stage = "CANCELLING"
+            run.updated_at = utc_now_iso()
             self._runs[run_id] = run
             self._upsert_run_to_postgres(run)
             return True

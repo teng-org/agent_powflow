@@ -7,9 +7,9 @@ services:
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     environment:
-      POSTGRES_DB: agentpowflow
-      POSTGRES_USER: apf
-      POSTGRES_PASSWORD: apf
+      POSTGRES_DB: ${POSTGRES_DB:-agentpowflow}
+      POSTGRES_USER: ${POSTGRES_USER:-apf}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apf}
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -20,8 +20,8 @@ services:
     ports:
       - "${MONGODB_PORT:-27017}:27017"
     environment:
-      MONGO_INITDB_ROOT_USERNAME: root
-      MONGO_INITDB_ROOT_PASSWORD: root
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-root}
     volumes:
       - mongodb_data:/data/db
 
@@ -33,13 +33,13 @@ services:
       - "${RABBITMQ_PORT:-5672}:5672"
       - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
     environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: agentpowflow-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -47,10 +47,48 @@ services:
       - "${MINIO_API_PORT:-9000}:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_SECRET_KEY:-minioadmin}
     volumes:
       - minio_data:/data
+
+  minio-service-identity-init:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: agentpowflow-minio-service-identity-init
+    restart: "no"
+    entrypoint: ["/bin/sh", "/scripts/init-minio-service-identities.sh"]
+    environment:
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ROOT_ACCESS_KEY: ${MINIO_ROOT_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_SECRET_KEY: ${MINIO_ROOT_SECRET_KEY:-minioadmin}
+      MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:-apf-app-dev}
+      MINIO_APP_SECRET_KEY: ${MINIO_APP_SECRET_KEY:-apf-app-dev-secret}
+      MINIO_GOVERNANCE_ACCESS_KEY: ${MINIO_GOVERNANCE_ACCESS_KEY:-apf-governance-dev}
+      MINIO_GOVERNANCE_SECRET_KEY: ${MINIO_GOVERNANCE_SECRET_KEY:-apf-governance-dev-secret}
+      MINIO_DOCUMENT_BUCKET: ${MINIO_DOCUMENT_BUCKET:-agent-powflow-documents}
+    volumes:
+      - ../scripts/init-minio-service-identities.sh:/scripts/init-minio-service-identities.sh:ro
+    depends_on:
+      - minio
+
+  minio-document-bucket-init:
+    build:
+      context: ../..
+      dockerfile: services/execution-plane/Dockerfile
+    container_name: agentpowflow-minio-document-bucket-init
+    restart: "no"
+    command: python -m runtime.object_storage_governance
+    environment:
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_GOVERNANCE_ACCESS_KEY:-apf-governance-dev}
+      MINIO_SECRET_KEY: ${MINIO_GOVERNANCE_SECRET_KEY:-apf-governance-dev-secret}
+      MINIO_DOCUMENT_BUCKET: ${MINIO_DOCUMENT_BUCKET:-agent-powflow-documents}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      MINIO_DOCUMENT_NONCURRENT_EXPIRY_DAYS: ${MINIO_DOCUMENT_NONCURRENT_EXPIRY_DAYS:-90}
+      MINIO_DOCUMENT_NONCURRENT_RETAIN_VERSIONS: ${MINIO_DOCUMENT_NONCURRENT_RETAIN_VERSIONS:-2}
+    depends_on:
+      minio-service-identity-init:
+        condition: service_completed_successfully
 
   qdrant:
     image: qdrant/qdrant:v1.12.5
@@ -69,19 +107,39 @@ services:
     container_name: agentpowflow-control-plane
     restart: unless-stopped
     ports:
-      - "${CONTROL_PLANE_PORT:-8080}:${CONTROL_PLANE_PORT:-8080}"
+      - "${CONTROL_PLANE_PORT:-8099}:8080"
     environment:
-      CONTROL_PLANE_PORT: ${CONTROL_PLANE_PORT:-8080}
-      CONTROL_PLANE_JWT_SECRET: ${EXECUTION_JWT_SECRET:-change-me-in-production}
+      CONTROL_PLANE_PORT: 8080
+      CONTROL_PLANE_JWT_SECRET: ${CONTROL_PLANE_JWT_SECRET:-dev-control-jwt-secret}
+      CONTROL_PLANE_JWT_KEY_ID: ${CONTROL_PLANE_JWT_KEY_ID:-control-dev-primary}
+      CONTROL_PLANE_JWT_PREVIOUS_KEYS: ${CONTROL_PLANE_JWT_PREVIOUS_KEYS:-}
+      CONTROL_PLANE_JWT_PREVIOUS_KEYS_EXPIRES_AT: ${CONTROL_PLANE_JWT_PREVIOUS_KEYS_EXPIRES_AT:-}
+      CONTROL_PLANE_JWT_LEGACY_ACCEPT_UNTIL: ${CONTROL_PLANE_JWT_LEGACY_ACCEPT_UNTIL:-}
       CONTROL_PLANE_ADMIN_USERNAME: ${EXECUTION_ADMIN_USERNAME:-admin}
       CONTROL_PLANE_ADMIN_PASSWORD: ${EXECUTION_ADMIN_PASSWORD:-admin123}
       CONTROL_PLANE_ADMIN_ROLE: ${EXECUTION_ADMIN_ROLE:-PLATFORM_ADMIN}
       CONTROL_PLANE_ADMIN_TENANT_ID: ${CONTROL_PLANE_ADMIN_TENANT_ID:-platform}
       CONTROL_PLANE_ACCESS_TTL_SECONDS: ${EXECUTION_JWT_TTL_SECONDS:-43200}
+      CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:-dev-internal-token}
+      CHAT_INTERNAL_BASE_URL: http://chat-plane:8092
+      EXECUTION_INTERNAL_DISPATCH_URL: http://execution-api:8090/api/v1/internal/control-runs/dispatch
+      EXECUTION_INTERNAL_BASE_URL: http://execution-api:8090
+      CONTROL_PLANE_EXECUTION_DISPATCH_ENABLED: ${CONTROL_PLANE_EXECUTION_DISPATCH_ENABLED:-true}
+      CONTROL_APPROVAL_ALERT_EVALUATION_ENABLED: ${CONTROL_APPROVAL_ALERT_EVALUATION_ENABLED:-true}
+      CONTROL_APPROVAL_ALERT_EVALUATION_INTERVAL_MS: ${CONTROL_APPROVAL_ALERT_EVALUATION_INTERVAL_MS:-15000}
+      CONTROL_APPROVAL_ALERT_DUE_SOON_SECONDS: ${CONTROL_APPROVAL_ALERT_DUE_SOON_SECONDS:-900}
+      CONTROL_APPROVAL_ALERT_WEBHOOK_URL: ${CONTROL_APPROVAL_ALERT_WEBHOOK_URL:-}
+      CONTROL_APPROVAL_ALERT_ALLOWED_HOSTS: ${CONTROL_APPROVAL_ALERT_ALLOWED_HOSTS:-}
+      CONTROL_APPROVAL_ALERT_ALLOW_HTTP: ${CONTROL_APPROVAL_ALERT_ALLOW_HTTP:-false}
+      CONTROL_APPROVAL_ALERT_ALLOW_PRIVATE_NETWORK: ${CONTROL_APPROVAL_ALERT_ALLOW_PRIVATE_NETWORK:-false}
+      CONTROL_APPROVAL_ALERT_DELIVERY_ENABLED: ${CONTROL_APPROVAL_ALERT_DELIVERY_ENABLED:-true}
+      CONTROL_APPROVAL_ALERT_MAX_ATTEMPTS: ${CONTROL_APPROVAL_ALERT_MAX_ATTEMPTS:-8}
+      CONTROL_APPROVAL_ALERT_REQUEST_TIMEOUT_MS: ${CONTROL_APPROVAL_ALERT_REQUEST_TIMEOUT_MS:-5000}
+      CONTROL_PLANE_CORS_ORIGINS: ${CONTROL_PLANE_CORS_ORIGINS:-http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:5177,http://localhost:5180,http://127.0.0.1:5173,http://127.0.0.1:5174,http://127.0.0.1:5175,http://127.0.0.1:5177,http://127.0.0.1:5180}
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/agentpowflow
-      SPRING_DATASOURCE_USERNAME: apf
-      SPRING_DATASOURCE_PASSWORD: apf
-      MONGODB_URI: mongodb://root:root@mongodb:27017/agentpowflow_events?authSource=admin
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-apf}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-apf}
+      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-root}:${MONGO_ROOT_PASSWORD:-root}@mongodb:27017/agentpowflow_events?authSource=admin
     depends_on:
       - postgres
       - mongodb
@@ -95,31 +153,68 @@ services:
     ports:
       - "${EXECUTION_API_PORT:-8090}:8090"
     environment:
-      API_POOL_DEFAULT_CONFIG: /app/services/execution-plane/config/api_pool.default.json
-      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
-      EMBEDDING_MODE: ${EMBEDDING_MODE:-api_prefer}
+      API_POOL_REFRESH_SECONDS: ${API_POOL_REFRESH_SECONDS:-5}
+      EMBEDDING_MODE: ${EMBEDDING_MODE:-local_only}
       EMBEDDING_MAX_CHARS: ${EMBEDDING_MAX_CHARS:-380}
       EXECUTION_ADMIN_TOKEN: ${EXECUTION_ADMIN_TOKEN:-dev-admin-token}
       EXECUTION_ADMIN_USERNAME: ${EXECUTION_ADMIN_USERNAME:-admin}
       EXECUTION_ADMIN_PASSWORD: ${EXECUTION_ADMIN_PASSWORD:-admin123}
       EXECUTION_ADMIN_ROLE: ${EXECUTION_ADMIN_ROLE:-PLATFORM_ADMIN}
       EXECUTION_JWT_SECRET: ${EXECUTION_JWT_SECRET:-dev-jwt-secret}
+      EXECUTION_JWT_KEY_ID: ${EXECUTION_JWT_KEY_ID:-dev-primary}
+      EXECUTION_JWT_PREVIOUS_KEYS: ${EXECUTION_JWT_PREVIOUS_KEYS:-}
+      EXECUTION_JWT_PREVIOUS_KEYS_EXPIRES_AT: ${EXECUTION_JWT_PREVIOUS_KEYS_EXPIRES_AT:-}
+      EXECUTION_JWT_LEGACY_ACCEPT_UNTIL: ${EXECUTION_JWT_LEGACY_ACCEPT_UNTIL:-}
       EXECUTION_JWT_TTL_SECONDS: ${EXECUTION_JWT_TTL_SECONDS:-43200}
+      CONTROL_PLANE_INTERNAL_URL: http://control-plane:8080
+      CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:-dev-internal-token}
+      TASK_AUTHORITY_CALLBACK_ENABLED: ${TASK_AUTHORITY_CALLBACK_ENABLED:-true}
       EXECUTION_ENV: ${EXECUTION_ENV:-dev}
+      EXECUTION_LEGACY_KB_WRITE_ENABLED: ${EXECUTION_LEGACY_KB_WRITE_ENABLED:-false}
+      WORKFLOW_SECRET_MASTER_KEY: ${WORKFLOW_SECRET_MASTER_KEY:-}
+      WORKFLOW_SECRET_PREVIOUS_MASTER_KEYS: ${WORKFLOW_SECRET_PREVIOUS_MASTER_KEYS:-}
       EXECUTION_AUDIT_ENABLED: ${EXECUTION_AUDIT_ENABLED:-true}
       EXECUTION_AUDIT_BASE_DIR: ${EXECUTION_AUDIT_BASE_DIR:-/app/logs/kb-audit}
       GLOBAL_KB_ID: ${GLOBAL_KB_ID:-global-kb}
-      EXECUTION_CORS_ORIGINS: ${EXECUTION_CORS_ORIGINS:-http://localhost:5177,http://localhost:5180}
-      POSTGRES_DSN: postgresql://apf:apf@postgres:5432/agentpowflow
+      RUNTIME_CONFIG_DEFAULT_PATH: ${RUNTIME_CONFIG_DEFAULT_PATH:-/app/config/runtime-config.default.json}
+      RUNTIME_CONFIG_USER_PATH: ${RUNTIME_CONFIG_USER_PATH:-/app/config/runtime-config.user.json}
+      EXECUTION_CORS_ORIGINS: ${EXECUTION_CORS_ORIGINS:-http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:5177,http://localhost:5180,http://127.0.0.1:5173,http://127.0.0.1:5174,http://127.0.0.1:5175,http://127.0.0.1:5177,http://127.0.0.1:5180}
+      EXECUTION_API_WORKERS: ${EXECUTION_API_WORKERS:-2}
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-apf}:${POSTGRES_PASSWORD:-apf}@postgres:5432/${POSTGRES_DB:-agentpowflow}
       QDRANT_URL: http://qdrant:6333
-      CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_TIMEOUT_SECONDS: ${QDRANT_TIMEOUT_SECONDS:-120}
+      QDRANT_UPSERT_BATCH_SIZE: ${QDRANT_UPSERT_BATCH_SIZE:-16}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:-apf-app-dev}
+      MINIO_SECRET_KEY: ${MINIO_APP_SECRET_KEY:-apf-app-dev-secret}
+      MINIO_DOCUMENT_BUCKET: ${MINIO_DOCUMENT_BUCKET:-agent-powflow-documents}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      CROSS_STORE_REPAIR_STALE_AFTER_SECONDS: ${CROSS_STORE_REPAIR_STALE_AFTER_SECONDS:-300}
+      CROSS_STORE_REPAIR_WARN_OPEN_COUNT: ${CROSS_STORE_REPAIR_WARN_OPEN_COUNT:-10}
+      CROSS_STORE_REPAIR_CRITICAL_OPEN_COUNT: ${CROSS_STORE_REPAIR_CRITICAL_OPEN_COUNT:-100}
+      CROSS_STORE_REPAIR_WARN_AGE_SECONDS: ${CROSS_STORE_REPAIR_WARN_AGE_SECONDS:-300}
+      CROSS_STORE_REPAIR_CRITICAL_AGE_SECONDS: ${CROSS_STORE_REPAIR_CRITICAL_AGE_SECONDS:-1800}
+      UPLOAD_MAX_FILES_PER_REQUEST: ${UPLOAD_MAX_FILES_PER_REQUEST:-20}
+      UPLOAD_MAX_BATCH_BYTES: ${UPLOAD_MAX_BATCH_BYTES:-209715200}
+      INGEST_MAX_TEXT_BYTES: ${INGEST_MAX_TEXT_BYTES:-10485760}
+      OBJECT_STORAGE_TENANT_QUOTA_BYTES: ${OBJECT_STORAGE_TENANT_QUOTA_BYTES:-0}
+      OBJECT_STORAGE_QUOTA_RESERVATION_TTL_SECONDS: ${OBJECT_STORAGE_QUOTA_RESERVATION_TTL_SECONDS:-300}
+      OBJECT_STORAGE_QUOTA_WARN_RATIO: ${OBJECT_STORAGE_QUOTA_WARN_RATIO:-0.8}
+      OBJECT_STORAGE_CAPACITY_TENANT_LIMIT: ${OBJECT_STORAGE_CAPACITY_TENANT_LIMIT:-100}
+      MINIO_PHYSICAL_CAPACITY_ENFORCE_WRITES: ${MINIO_PHYSICAL_CAPACITY_ENFORCE_WRITES:-false}
+      CELERY_BROKER_URL: amqp://${RABBITMQ_USERNAME:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672//
       CELERY_RESULT_BACKEND: rpc://
     volumes:
       - ../../logs:/app/logs
-      - ../../config:/app/config:ro
+      - ../../config:/app/config
     depends_on:
-      - rabbitmq
-      - postgres
+      rabbitmq:
+        condition: service_started
+      postgres:
+        condition: service_started
+      minio-document-bucket-init:
+        condition: service_completed_successfully
 
   execution-worker:
     build:
@@ -127,31 +222,57 @@ services:
       dockerfile: services/execution-plane/Dockerfile
     container_name: agentpowflow-execution-worker
     restart: unless-stopped
-    command: >
-      celery -A workers.app.celery_app:celery_app worker
-      -Q parse_queue,embed_queue,index_queue,agent_queue
-      -l info
+    command:
+      - sh
+      - -c
+      - python -m retrieval.schema_migrations && exec celery -A workers.app.celery_app:celery_app worker -Q parse_queue,embed_queue,index_queue,agent_queue,control_run_queue,control_run_dead_letter -l info
     environment:
-      API_POOL_DEFAULT_CONFIG: /app/services/execution-plane/config/api_pool.default.json
-      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
-      EMBEDDING_MODE: ${EMBEDDING_MODE:-api_prefer}
+      API_POOL_REFRESH_SECONDS: ${API_POOL_REFRESH_SECONDS:-5}
+      EMBEDDING_MODE: ${EMBEDDING_MODE:-local_only}
       EMBEDDING_MAX_CHARS: ${EMBEDDING_MAX_CHARS:-380}
       EXECUTION_ADMIN_TOKEN: ${EXECUTION_ADMIN_TOKEN:-dev-admin-token}
       EXECUTION_ADMIN_USERNAME: ${EXECUTION_ADMIN_USERNAME:-admin}
       EXECUTION_ADMIN_PASSWORD: ${EXECUTION_ADMIN_PASSWORD:-admin123}
       EXECUTION_ADMIN_ROLE: ${EXECUTION_ADMIN_ROLE:-PLATFORM_ADMIN}
       EXECUTION_JWT_SECRET: ${EXECUTION_JWT_SECRET:-dev-jwt-secret}
+      EXECUTION_JWT_KEY_ID: ${EXECUTION_JWT_KEY_ID:-dev-primary}
+      EXECUTION_JWT_PREVIOUS_KEYS: ${EXECUTION_JWT_PREVIOUS_KEYS:-}
+      EXECUTION_JWT_PREVIOUS_KEYS_EXPIRES_AT: ${EXECUTION_JWT_PREVIOUS_KEYS_EXPIRES_AT:-}
+      EXECUTION_JWT_LEGACY_ACCEPT_UNTIL: ${EXECUTION_JWT_LEGACY_ACCEPT_UNTIL:-}
       EXECUTION_JWT_TTL_SECONDS: ${EXECUTION_JWT_TTL_SECONDS:-43200}
+      CONTROL_PLANE_INTERNAL_URL: http://control-plane:8080
+      CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:-dev-internal-token}
+      TASK_AUTHORITY_CALLBACK_ENABLED: ${TASK_AUTHORITY_CALLBACK_ENABLED:-true}
+      WORKFLOW_PROVIDER_MODE: ${WORKFLOW_PROVIDER_MODE:-mock}
+      WORKFLOW_HTTP_ALLOWED_HOSTS: ${WORKFLOW_HTTP_ALLOWED_HOSTS:-}
+      WORKFLOW_HTTP_ALLOW_HTTP: ${WORKFLOW_HTTP_ALLOW_HTTP:-false}
+      WORKFLOW_HTTP_ALLOW_PRIVATE_NETWORKS: ${WORKFLOW_HTTP_ALLOW_PRIVATE_NETWORKS:-false}
+      WORKFLOW_HTTP_MAX_RESPONSE_BYTES: ${WORKFLOW_HTTP_MAX_RESPONSE_BYTES:-1048576}
+      WORKFLOW_HTTP_MAX_TIMEOUT_SECONDS: ${WORKFLOW_HTTP_MAX_TIMEOUT_SECONDS:-30}
+      WORKFLOW_SECRET_MASTER_KEY: ${WORKFLOW_SECRET_MASTER_KEY:-}
+      WORKFLOW_SECRET_PREVIOUS_MASTER_KEYS: ${WORKFLOW_SECRET_PREVIOUS_MASTER_KEYS:-}
       GLOBAL_KB_ID: ${GLOBAL_KB_ID:-global-kb}
-      EXECUTION_CORS_ORIGINS: ${EXECUTION_CORS_ORIGINS:-http://localhost:5177,http://localhost:5180}
-      POSTGRES_DSN: postgresql://apf:apf@postgres:5432/agentpowflow
+      RUNTIME_CONFIG_DEFAULT_PATH: ${RUNTIME_CONFIG_DEFAULT_PATH:-/app/config/runtime-config.default.json}
+      RUNTIME_CONFIG_USER_PATH: ${RUNTIME_CONFIG_USER_PATH:-/app/config/runtime-config.user.json}
+      EXECUTION_CORS_ORIGINS: ${EXECUTION_CORS_ORIGINS:-http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:5177,http://localhost:5180,http://127.0.0.1:5173,http://127.0.0.1:5174,http://127.0.0.1:5175,http://127.0.0.1:5177,http://127.0.0.1:5180}
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-apf}:${POSTGRES_PASSWORD:-apf}@postgres:5432/${POSTGRES_DB:-agentpowflow}
       QDRANT_URL: http://qdrant:6333
-      CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_TIMEOUT_SECONDS: ${QDRANT_TIMEOUT_SECONDS:-120}
+      QDRANT_UPSERT_BATCH_SIZE: ${QDRANT_UPSERT_BATCH_SIZE:-16}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:-apf-app-dev}
+      MINIO_SECRET_KEY: ${MINIO_APP_SECRET_KEY:-apf-app-dev-secret}
+      MINIO_DOCUMENT_BUCKET: ${MINIO_DOCUMENT_BUCKET:-agent-powflow-documents}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      CROSS_STORE_REPAIR_STALE_AFTER_SECONDS: ${CROSS_STORE_REPAIR_STALE_AFTER_SECONDS:-300}
+      CELERY_BROKER_URL: amqp://${RABBITMQ_USERNAME:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672//
       CELERY_RESULT_BACKEND: rpc://
     depends_on:
       - rabbitmq
       - execution-api
       - postgres
+      - minio
     volumes:
       - ../../config:/app/config:ro
 
@@ -165,17 +286,125 @@ services:
       - "${CHAT_PLANE_PORT:-8092}:8092"
     environment:
       CHAT_PLANE_PORT: ${CHAT_PLANE_PORT:-8092}
+      CHAT_PROVIDER_MODE: ${CHAT_PROVIDER_MODE:-mock}
+      CONTROL_PLANE_JWT_SECRET: ${CONTROL_PLANE_JWT_SECRET:-dev-control-jwt-secret}
+      CONTROL_PLANE_JWT_KEY_ID: ${CONTROL_PLANE_JWT_KEY_ID:-control-dev-primary}
+      CONTROL_PLANE_JWT_PREVIOUS_KEYS: ${CONTROL_PLANE_JWT_PREVIOUS_KEYS:-}
+      CONTROL_PLANE_JWT_PREVIOUS_KEYS_EXPIRES_AT: ${CONTROL_PLANE_JWT_PREVIOUS_KEYS_EXPIRES_AT:-}
+      CONTROL_PLANE_JWT_LEGACY_ACCEPT_UNTIL: ${CONTROL_PLANE_JWT_LEGACY_ACCEPT_UNTIL:-}
       EXECUTION_API_BASE_URL: http://execution-api:8090
-      EXECUTION_ADMIN_TOKEN: ${EXECUTION_ADMIN_TOKEN:-dev-admin-token}
-      CHAT_API_POOL_DEFAULT_CONFIG: /app/services/chat-plane/config/chat_api_pool.default.json
+      CONTROL_PLANE_INTERNAL_URL: http://control-plane:8080
+      CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:-dev-internal-token}
       RUNTIME_CONFIG_PATH: /app/config/runtime-config.json
-      POSTGRES_DSN: postgresql://apf:apf@postgres:5432/agentpowflow
+      RUNTIME_CONFIG_DEFAULT_PATH: ${RUNTIME_CONFIG_DEFAULT_PATH:-/app/config/runtime-config.default.json}
+      RUNTIME_CONFIG_USER_PATH: ${RUNTIME_CONFIG_USER_PATH:-/app/config/runtime-config.user.json}
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-apf}:${POSTGRES_PASSWORD:-apf}@postgres:5432/${POSTGRES_DB:-agentpowflow}
     depends_on:
+      - control-plane
       - execution-api
       - postgres
     volumes:
       - ../../config:/app/config:ro
       - ../../data:/app/data
+
+  web-app:
+    build:
+      context: ../..
+      dockerfile: apps/Dockerfile.vite
+      args:
+        APP_DIR: apps/web-app
+    container_name: agentpowflow-web-app
+    restart: unless-stopped
+    ports:
+      - "${WEB_APP_PORT:-5173}:${WEB_APP_PORT:-5173}"
+    environment:
+      WEB_APP_PORT: ${WEB_APP_PORT:-5173}
+      CONTROL_PROXY_TARGET: http://control-plane:8080
+      EXECUTION_PROXY_TARGET: http://execution-api:8090
+      CHAT_PROXY_TARGET: http://chat-plane:8092
+    depends_on:
+      - control-plane
+      - chat-plane
+      - execution-api
+
+  web-admin:
+    build:
+      context: ../..
+      dockerfile: apps/Dockerfile.vite
+      args:
+        APP_DIR: apps/web-admin
+    container_name: agentpowflow-web-admin
+    restart: unless-stopped
+    ports:
+      - "${WEB_ADMIN_PORT:-5174}:${WEB_ADMIN_PORT:-5174}"
+    environment:
+      WEB_ADMIN_PORT: ${WEB_ADMIN_PORT:-5174}
+      CONTROL_PROXY_TARGET: http://control-plane:8080
+      EXECUTION_PROXY_TARGET: http://execution-api:8090
+      CHAT_PROXY_TARGET: http://chat-plane:8092
+    depends_on:
+      - control-plane
+      - execution-api
+      - chat-plane
+
+  edge-gateway:
+    profiles: ["edge-gateway"]
+    image: kong:3.9
+    container_name: agentpowflow-edge-gateway
+    restart: unless-stopped
+    ports:
+      - "${PUBLIC_API_PORT:-8088}:8000"
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/declarative/kong.yml
+      KONG_ADMIN_LISTEN: "off"
+      KONG_STATUS_LISTEN: 0.0.0.0:8100
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      # Docker service IPs change when an upstream container is recreated.
+      # Keep the resolver cache short so published APIs recover without a gateway restart.
+      KONG_DNS_VALID_TTL: 1
+      KONG_DNS_STALE_TTL: 0
+      KONG_DNS_NOT_FOUND_TTL: 1
+      KONG_DNS_ERROR_TTL: 1
+    volumes:
+      - ./kong/kong.yml:/kong/declarative/kong.yml:ro
+    depends_on:
+      - control-plane
+
+  debug-web:
+    profiles: ["developer-tools"]
+    build:
+      context: ../..
+      dockerfile: apps/Dockerfile.vite
+      args:
+        APP_DIR: apps/debug-web
+    container_name: agentpowflow-debug-web
+    restart: unless-stopped
+    ports:
+      - "${DEBUG_WEB_PORT:-5177}:${DEBUG_WEB_PORT:-5177}"
+    environment:
+      DEBUG_WEB_PORT: ${DEBUG_WEB_PORT:-5177}
+    depends_on:
+      - control-plane
+      - execution-api
+      - chat-plane
+
+  kb-admin-web:
+    build:
+      context: ../..
+      dockerfile: apps/Dockerfile.vite
+      args:
+        APP_DIR: apps/kb-admin-web
+    container_name: agentpowflow-kb-admin-web
+    restart: unless-stopped
+    ports:
+      - "${KB_ADMIN_WEB_PORT:-5180}:${KB_ADMIN_WEB_PORT:-5180}"
+    environment:
+      KB_ADMIN_WEB_PORT: ${KB_ADMIN_WEB_PORT:-5180}
+    depends_on:
+      - control-plane
+      - execution-api
 
 volumes:
   postgres_data:

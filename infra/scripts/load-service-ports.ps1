@@ -9,7 +9,7 @@ if (!(Test-Path $ConfigPath)) {
   throw "Ports config not found: $ConfigPath"
 }
 
-$ports = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+$ports = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
 $mapping = @{
   "CONTROL_PLANE_PORT"      = [string]$ports.control_plane_port

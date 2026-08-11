@@ -1,6 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
 :root {
+  color-scheme: light;
   --bg: #f3f6f9;
   --bg-accent: radial-gradient(circle at 8% 12%, #d3f5e8 0%, transparent 35%),
     radial-gradient(circle at 92% 85%, #c4dcff 0%, transparent 35%);
@@ -13,6 +14,10 @@
   --ok: #0c9b64;
   --danger: #db2f45;
   --shadow: 0 10px 24px rgba(27, 53, 84, 0.1);
+  --select-popup-bg: #ffffff;
+  --select-popup-text: #192231;
+  --select-popup-muted: #7a8da5;
+  --select-popup-selected: #0b74ff;
 }
 
 * {
@@ -32,6 +37,21 @@ body {
   color: var(--text);
   background: var(--bg);
   background-image: var(--bg-accent);
+}
+
+select option,
+select optgroup {
+  color: var(--select-popup-text);
+  background-color: var(--select-popup-bg);
+}
+
+select option:checked {
+  color: #fff;
+  background-color: var(--select-popup-selected);
+}
+
+select option:disabled {
+  color: var(--select-popup-muted);
 }
 
 .login-shell {
@@ -281,7 +301,7 @@ textarea {
 
 textarea {
   width: 100%;
-  resize: vertical;
+  resize: none !important;
 }
 
 .actions {

@@ -11,7 +11,7 @@
 
 - 启动基础依赖：PostgreSQL / MongoDB / RabbitMQ / MinIO / Qdrant
 - 启动后端：Control Plane（Spring）+ Execution API（FastAPI）+ Worker（Celery）
-- 启动前端：`apps/debug-web` + `apps/kb-admin-web`
+- 启动前端：统一管理端 `apps/web-admin` + 接口调试端 `apps/debug-web`
 - 跑通最小链路：管理员登录 -> 文档异步入库 -> 切片查看 -> 检索 -> Agent 执行
 
 ## 2. 环境前置
@@ -145,22 +145,23 @@ npm run dev
 浏览器打开：`http://localhost:5177`
 浏览器打开：`http://localhost:$env:DEBUG_WEB_PORT`
 
-### 3.6 启动 kb-admin-web（Vue3）
+### 3.6 启动统一 web-admin（Vue3）
 
 新开终端：
 
 ```powershell
-cd apps/kb-admin-web
+cd apps/web-admin
 npm install
 npm run dev
 ```
 
-浏览器打开：`http://localhost:5180`
-浏览器打开：`http://localhost:$env:KB_ADMIN_WEB_PORT`
+浏览器打开：`http://localhost:5174`
+
+旧 `apps/kb-admin-web` 已退役，默认 Compose 不启动。仅在有明确负责人和到期时间的兼容回滚中，才允许同时使用 `--profile legacy-kb-admin` 与 `EXECUTION_LEGACY_KB_WRITE_ENABLED=true`；日常开发不得在旧前端新增功能。
 
 ## 4. 知识库管理调试路径（推荐）
 
-优先在 `kb-admin-web` 执行：
+优先在 `web-admin` 的“智能体 → 知识库”执行：
 
 1. 管理员登录（默认 `admin/admin123`）
 2. 上传文档并提交异步入库任务
@@ -176,7 +177,7 @@ npm run dev
 
 说明：
 
-- 知识库接口位于 `/api/v1/admin/kb/*`，需要管理员 token
+- 知识库公开写接口位于 Control Plane `/api/v1/admin/kbs/*`，需要管理员 token；Execution 同类公开写默认返回 `410 LEGACY_KB_WRITE_RETIRED`
 - 全局 Header 建议设置：
   - `X-Tenant-Id`
   - `X-Actor-Id`

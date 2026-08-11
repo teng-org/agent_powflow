@@ -1,0 +1,74 @@
+services:
+  minio-metrics-token-init:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: agentpowflow-minio-metrics-token-init
+    restart: "no"
+    entrypoint: ["/bin/sh", "/scripts/init-minio-prometheus-token.sh"]
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_SECRET_KEY:-minioadmin}
+      ALERTMANAGER_WEBHOOK_TOKEN: ${ALERTMANAGER_WEBHOOK_TOKEN:-dev-alertmanager-webhook-token-change-me}
+    volumes:
+      - ../scripts/init-minio-prometheus-token.sh:/scripts/init-minio-prometheus-token.sh:ro
+      - minio_metrics_token:/shared
+    depends_on:
+      minio-service-identity-init:
+        condition: service_completed_successfully
+
+  alertmanager:
+    image: prom/alertmanager:v0.33.1
+    container_name: agentpowflow-alertmanager
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    ports:
+      - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ../observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - minio_metrics_token:/etc/alertmanager/secrets:ro
+      - alertmanager_data:/alertmanager
+    depends_on:
+      minio-metrics-token-init:
+        condition: service_completed_successfully
+
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    container_name: agentpowflow-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}
+      - --web.enable-lifecycle
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../observability/rules:/etc/prometheus/rules:ro
+      - minio_metrics_token:/etc/prometheus/secrets:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      minio-metrics-token-init:
+        condition: service_completed_successfully
+      alertmanager:
+        condition: service_started
+
+  execution-api:
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+      MINIO_PHYSICAL_CAPACITY_WARN_FREE_RATIO: ${MINIO_PHYSICAL_CAPACITY_WARN_FREE_RATIO:-0.20}
+      MINIO_PHYSICAL_CAPACITY_CRITICAL_FREE_RATIO: ${MINIO_PHYSICAL_CAPACITY_CRITICAL_FREE_RATIO:-0.10}
+      PROMETHEUS_QUERY_TIMEOUT_SECONDS: ${PROMETHEUS_QUERY_TIMEOUT_SECONDS:-3}
+      ALERTMANAGER_WEBHOOK_TOKEN: ${ALERTMANAGER_WEBHOOK_TOKEN:-dev-alertmanager-webhook-token-change-me}
+      ALERTMANAGER_WEBHOOK_MAX_ALERTS: ${ALERTMANAGER_WEBHOOK_MAX_ALERTS:-100}
+      ALERTMANAGER_ALERT_RETENTION_DAYS: ${ALERTMANAGER_ALERT_RETENTION_DAYS:-90}
+    depends_on:
+      prometheus:
+        condition: service_started
+
+volumes:
+  minio_metrics_token:
+  prometheus_data:
+  alertmanager_data:

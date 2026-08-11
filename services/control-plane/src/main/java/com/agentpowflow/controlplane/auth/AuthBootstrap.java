@@ -62,6 +62,11 @@ public class AuthBootstrap implements CommandLineRunner {
             u.setStatus("ACTIVE");
             return userRepository.save(u);
         });
+        if (!passwordEncoder.matches(authProperties.getAdminPassword(), adminUser.getPasswordHash())) {
+            adminUser.setPasswordHash(passwordEncoder.encode(authProperties.getAdminPassword()));
+            adminUser.setStatus("ACTIVE");
+            adminUser = userRepository.save(adminUser);
+        }
 
         boolean linked = userRoleRepository.findByTenantIdAndUserId(tenant.getTenantId(), adminUser.getUserId())
                 .stream()
@@ -85,4 +90,3 @@ public class AuthBootstrap implements CommandLineRunner {
         });
     }
 }
-

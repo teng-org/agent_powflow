@@ -14,12 +14,12 @@
 - 前端移除 Task 面板，改为顶部悬浮通知（按任务最终状态通知）。
 - 弹窗交互统一：底部按钮右对齐，取消即退出，不再保留 `Close` 按钮。
 - 上传弹窗重构：仅保留拖拽/点选上传区 + 待上传文件列表 + 移除按钮。
-- 新增单文件上传大小限制：默认 `20MB`，并提供后端配置 API 可修改。
+- 新增单文件上传大小限制：默认 `50MB`，并提供后端配置 API 可修改。
 - Execution Plane 数据主存从 MongoDB 迁移为 PostgreSQL（知识库/文档/chunk/task/api 池）。
 - 保留 Qdrant 作为向量索引，RabbitMQ 作为异步队列。
 
 ### 1.2 当前默认约束
-- 单文件最大体积：`20MB`
+- 单文件最大体积：`50MB`
 - 支持上传扩展名：`.txt .md .markdown .html .htm .pdf .docx`
 - 超限文件：前端本地拦截 + 后端二次校验（双保险）
 
@@ -43,7 +43,7 @@
 - `PUT /api/v1/admin/system/upload-settings`
   - body:
   ```json
-  { "max_file_size_mb": 20 }
+  { "max_file_size_mb": 50 }
   ```
   - 权限：`PLATFORM_ADMIN`
 
@@ -87,9 +87,9 @@
 1. 管理员登录知识库页面。
 2. 上传 1 个小 `txt` 文件（验证正常链路）。
 3. 上传 1 个 `pdf` 与 1 个 `docx`（验证解析与切片可读性）。
-4. 上传 1 个超过 `20MB` 的文件（验证前端拦截与后端兜底）。
-5. 调用 `PUT /api/v1/admin/system/upload-settings` 改为 `50MB`。
-6. 回到上传弹窗确认上限显示已更新，再次上传 20MB 以上文件。
+4. 上传 1 个超过 `50MB` 的文件（验证前端拦截与后端兜底）。
+5. 调用 `PUT /api/v1/admin/system/upload-settings` 调整上限。
+6. 回到上传弹窗确认上限显示已更新，再次上传接近上限的文件。
 7. 检查最终通知是否仅在任务完成/失败时弹出。
 
 ## 6. 已知风险与下一步
