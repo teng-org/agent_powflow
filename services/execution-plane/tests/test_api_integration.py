@@ -16,6 +16,7 @@ if str(EXECUTION_ROOT) not in sys.path:
 
 from api.app import main as api_main
 from postgres_test_support import IsolatedPostgresCase
+from retrieval.store import ChunkRecord
 from runtime.object_storage import ObjectStorage
 from test_object_storage import InMemoryMinio
 
@@ -120,7 +121,13 @@ class ExecutionApiIntegrationTest(IsolatedPostgresCase):
         doc_id = "doc-internal-chunk-draft"
         self.store.create_kb(tenant_id, kb_id, "Chunk draft KB")
         self.store.save_document(tenant_id, kb_id, doc_id, "draft.txt", "draft source")
-        self.store.replace_chunks(tenant_id, kb_id, doc_id, ["first chunk"], "draft.txt")
+        with patch.object(self.store, "_replace_qdrant_document_chunks", return_value=None):
+            self.store.replace_chunks(
+                tenant_id,
+                kb_id,
+                doc_id,
+                [ChunkRecord(tenant_id, kb_id, doc_id, f"{doc_id}-0", 0, "first chunk", [0.1, 0.2, 0.3], {"filename": "draft.txt"})],
+            )
         chunk = self.store.list_chunks(tenant_id, kb_id, doc_id, limit=10)[0]
         self.store.set_chunk_draft(tenant_id, kb_id, doc_id, chunk["chunk_id"], "delete", "")
 
@@ -142,7 +149,16 @@ class ExecutionApiIntegrationTest(IsolatedPostgresCase):
         doc_id = "doc-internal-chunk-replace"
         self.store.create_kb(tenant_id, kb_id, "Chunk replace KB")
         self.store.save_document(tenant_id, kb_id, doc_id, "replace.txt", "source")
-        self.store.replace_chunks(tenant_id, kb_id, doc_id, ["Alpha alpha", "no match"], "replace.txt")
+        with patch.object(self.store, "_replace_qdrant_document_chunks", return_value=None):
+            self.store.replace_chunks(
+                tenant_id,
+                kb_id,
+                doc_id,
+                [
+                    ChunkRecord(tenant_id, kb_id, doc_id, f"{doc_id}-0", 0, "Alpha alpha", [0.1, 0.2, 0.3], {"filename": "replace.txt"}),
+                    ChunkRecord(tenant_id, kb_id, doc_id, f"{doc_id}-1", 1, "no match", [0.2, 0.3, 0.4], {"filename": "replace.txt"}),
+                ],
+            )
 
         path = f"/api/v1/internal/kbs/{tenant_id}/{kb_id}/documents/{doc_id}/chunks/replace"
         headers = {"X-Internal-Token": "integration-internal-token"}
