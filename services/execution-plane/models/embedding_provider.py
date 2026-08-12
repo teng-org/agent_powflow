@@ -17,11 +17,11 @@ class EmbeddingProvider:
             return None
         if endpoint.provider not in {"siliconflow", "openai", "openai_compatible"}:
             return None
-        raw = (os.getenv("EMBEDDING_MAX_CHARS", "380") or "").strip()
+        raw = (os.getenv("EMBEDDING_MAX_CHARS", "4000") or "").strip()
         try:
             value = int(raw)
         except Exception:
-            value = 380
+            value = 4000
         if value <= 0:
             return None
         return value

@@ -22,7 +22,7 @@ import java.util.UUID;
 @Service
 public class DocumentMutationCommandService {
     private static final Set<String> ACTIVE = Set.of("PENDING", "RUNNING", "CANCELLING");
-    private static final Set<String> CHUNK_METHODS = Set.of("fixed", "sentence", "paragraph", "markdown", "delimiter");
+    private static final Set<String> CHUNK_METHODS = Set.of("fixed", "sentence", "paragraph", "markdown", "delimiter", "page");
     private static final Map<String, String> TASK_TYPES = Map.of(
             "summarize", "DOC_SUMMARIZE",
             "chunk", "DOC_CHUNK",

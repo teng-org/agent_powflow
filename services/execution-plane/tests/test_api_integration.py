@@ -114,6 +114,60 @@ class ExecutionApiIntegrationTest(IsolatedPostgresCase):
         self.assertEqual(200, deleted.status_code, deleted.text)
         self.assertIsNone(self.store.get_kb("tenant-internal-a", "kb-internal"))
 
+    def test_internal_chunk_list_includes_pending_drafts(self):
+        tenant_id = "tenant-internal-chunk-draft"
+        kb_id = "kb-internal-chunk-draft"
+        doc_id = "doc-internal-chunk-draft"
+        self.store.create_kb(tenant_id, kb_id, "Chunk draft KB")
+        self.store.save_document(tenant_id, kb_id, doc_id, "draft.txt", "draft source")
+        self.store.replace_chunks(tenant_id, kb_id, doc_id, ["first chunk"], "draft.txt")
+        chunk = self.store.list_chunks(tenant_id, kb_id, doc_id, limit=10)[0]
+        self.store.set_chunk_draft(tenant_id, kb_id, doc_id, chunk["chunk_id"], "delete", "")
+
+        with patch.object(api_main, "CONTROL_PLANE_INTERNAL_TOKEN", "integration-internal-token"):
+            response = self._request(
+                "GET",
+                f"/api/v1/internal/kbs/{tenant_id}/{kb_id}/documents/{doc_id}/chunks?limit=10",
+                tenant_id,
+                headers={"X-Internal-Token": "integration-internal-token"},
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("delete", response.json()["items"][0]["draft"]["action"])
+        self.assertEqual("delete", response.json()["drafts"][0]["action"])
+
+    def test_internal_chunk_text_replace_previews_then_stages_edit_drafts(self):
+        tenant_id = "tenant-internal-chunk-replace"
+        kb_id = "kb-internal-chunk-replace"
+        doc_id = "doc-internal-chunk-replace"
+        self.store.create_kb(tenant_id, kb_id, "Chunk replace KB")
+        self.store.save_document(tenant_id, kb_id, doc_id, "replace.txt", "source")
+        self.store.replace_chunks(tenant_id, kb_id, doc_id, ["Alpha alpha", "no match"], "replace.txt")
+
+        path = f"/api/v1/internal/kbs/{tenant_id}/{kb_id}/documents/{doc_id}/chunks/replace"
+        headers = {"X-Internal-Token": "integration-internal-token"}
+        with patch.object(api_main, "CONTROL_PLANE_INTERNAL_TOKEN", "integration-internal-token"):
+            preview = self._request(
+                "POST", path, tenant_id, headers=headers,
+                json={"search_text": "alpha", "replacement_text": "beta", "case_sensitive": False, "apply": False},
+            )
+        self.assertEqual(200, preview.status_code, preview.text)
+        self.assertEqual(1, preview.json()["matched_chunks"])
+        self.assertEqual(2, preview.json()["match_count"])
+        self.assertEqual([], self.store.list_chunk_drafts(tenant_id, kb_id, doc_id))
+
+        with patch.object(api_main, "CONTROL_PLANE_INTERNAL_TOKEN", "integration-internal-token"):
+            applied = self._request(
+                "POST", path, tenant_id, headers=headers,
+                json={"search_text": "alpha", "replacement_text": "beta", "case_sensitive": False, "apply": True},
+            )
+
+        self.assertEqual(200, applied.status_code, applied.text)
+        self.assertEqual(1, applied.json()["staged_chunks"])
+        drafts = self.store.list_chunk_drafts(tenant_id, kb_id, doc_id)
+        self.assertEqual("edit", drafts[0]["action"])
+        self.assertEqual("beta beta", drafts[0]["text"])
+
     def test_internal_task_revoke_requires_control_token_and_bounds_batch(self):
         with patch.object(api_main, "CONTROL_PLANE_INTERNAL_TOKEN", "integration-internal-token"):
             denied = self._request(

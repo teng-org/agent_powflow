@@ -59,23 +59,26 @@ def parse_content_blocks(text: str) -> list[ContentBlock]:
     blocks: list[ContentBlock] = []
     section_stack: list[str] = []
     buffer: list[str] = []
+    pending_heading_lines: list[str] = []
     page = 1
     block_page = 1
     fenced = False
 
     def flush() -> None:
-        nonlocal buffer, block_page
-        value = "\n".join(buffer).strip()
+        nonlocal buffer, pending_heading_lines, block_page
+        body_value = "\n".join(buffer).strip()
+        value = "\n".join([*pending_heading_lines, *buffer]).strip()
         if value:
             blocks.append(ContentBlock(
                 block_index=len(blocks),
                 text=value,
-                block_type=_block_type(value, fenced=fenced),
+                block_type=_block_type(body_value or value, fenced=fenced),
                 section_path=tuple(section_stack),
                 page_start=block_page,
                 page_end=page,
             ))
         buffer = []
+        pending_heading_lines = []
         block_page = page
 
     for raw_line in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -92,9 +95,13 @@ def parse_content_blocks(text: str) -> list[ContentBlock]:
                 title = heading.group(2).strip()
                 section_stack[:] = section_stack[: level - 1]
                 section_stack.append(title)
+                # Keep the heading in the following semantic block so it is
+                # retrievable without creating a tiny heading-only chunk.
+                pending_heading_lines = [line]
             elif not fenced and stripped and len(stripped) <= 100 and _PLAIN_HEADING.match(stripped):
                 flush()
                 section_stack[:] = [stripped]
+                pending_heading_lines = [line]
             elif stripped.startswith("```"):
                 if fenced:
                     buffer.append(line)
@@ -106,7 +113,8 @@ def parse_content_blocks(text: str) -> list[ContentBlock]:
                     block_page = page
                     buffer.append(line)
             elif not fenced and not stripped:
-                flush()
+                if buffer:
+                    flush()
             else:
                 if not buffer:
                     block_page = page
@@ -184,4 +192,49 @@ def build_parent_child_chunks(
                     page_start=block.page_start,
                     page_end=block.page_end,
                 ))
+    return children
+
+
+def build_page_chunks(
+    text: str,
+    *,
+    identity: str,
+    max_child_chars: int | None = None,
+    overflow_overlap: int = 40,
+) -> list[ChildChunk]:
+    """Create citation-friendly chunks whose primary boundary is a source page.
+
+    PDF extraction separates pages with a form-feed character. Each non-empty
+    source page becomes one chunk unless it exceeds the embedding provider's
+    hard input limit; oversized pages are split only within that page and every
+    child retains the same page number.
+    """
+    children: list[ChildChunk] = []
+    pages = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\f")
+    for page_index, raw_page in enumerate(pages):
+        page_text = raw_page.strip()
+        if not page_text:
+            continue
+        page_number = page_index + 1
+        parent_key = f"{identity}:page:{page_number}:{page_text}"
+        parent_id = hashlib.sha1(parent_key.encode("utf-8")).hexdigest()  # nosec B324
+        if max_child_chars and len(page_text) > int(max_child_chars):
+            pieces = _split_child(
+                page_text,
+                int(max_child_chars),
+                min(max(0, int(overflow_overlap)), max(0, int(max_child_chars) // 4)),
+            )
+        else:
+            pieces = [page_text]
+        for piece in pieces:
+            children.append(ChildChunk(
+                text=piece,
+                parent_id=parent_id,
+                parent_index=page_index,
+                parent_text=page_text,
+                section_path=(),
+                block_type="page",
+                page_start=page_number,
+                page_end=page_number,
+            ))
     return children

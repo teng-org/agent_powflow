@@ -97,6 +97,21 @@ class DocumentBatchCommandServiceTest {
     }
 
     @Test
+    void acceptsPageChunkingForBatchRechunk() {
+        TaskDto.BatchDocumentsRequest request = new TaskDto.BatchDocumentsRequest(
+                "chunk", List.of("doc-a", "doc-b"), "page", null, 500, 50,
+                null, null, null, "page batch"
+        );
+
+        service.submit("tenant-a", "actor-a", "trace-page", "kb-a", request);
+
+        verify(outboxService, times(2)).enqueue(
+                eq("tenant-a"), anyString(), eq("DOCUMENT_BATCH_ITEM"),
+                org.mockito.ArgumentMatchers.argThat(json -> json.contains("\"chunk_method\":\"page\""))
+        );
+    }
+
+    @Test
     void rejectsWholeBatchWhenAnyDocumentAlreadyHasAnActiveCommand() {
         TaskEntity active = new TaskEntity();
         active.setTaskId("active-task");

@@ -87,6 +87,22 @@ class DocumentMutationCommandServiceTest {
     }
 
     @Test
+    void acceptsPageChunkingForDocumentRechunk() {
+        when(taskRepository.findFirstByTenantIdAndKbIdAndDocIdAndStatusInOrderByCreatedAtAsc(
+                anyString(), anyString(), anyString(), anySet())).thenReturn(Optional.empty());
+        var pageChunk = new TaskDto.DocumentCommandRequest("page", null, 500, 50, null, null, null);
+
+        TaskDto.DocumentCommandAcceptedResponse response = service.submitDocument(
+                "tenant-a", "actor-a", "trace-page", "kb-a", "doc-page", "chunk", pageChunk
+        );
+
+        verify(outboxService).enqueue(
+                eq("tenant-a"), eq(response.task_id()), eq("DOCUMENT_COMMAND"),
+                argThat(json -> json.contains("\"chunk_method\":\"page\""))
+        );
+    }
+
+    @Test
     void deduplicatesSameCommandAndRejectsCompetingMutation() {
         TaskEntity active = new TaskEntity();
         active.setTaskId("active-task");

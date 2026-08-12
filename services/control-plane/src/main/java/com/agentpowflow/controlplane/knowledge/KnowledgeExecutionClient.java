@@ -319,6 +319,23 @@ public class KnowledgeExecutionClient {
         );
     }
 
+    public Map<String, Object> replaceChunkText(
+            String tenantId, String kbId, String docId, String searchText, String replacementText,
+            boolean caseSensitive, boolean apply
+    ) {
+        return metadataMutation(
+                HttpMethod.POST,
+                "/api/v1/internal/kbs/{tenantId}/{kbId}/documents/{docId}/chunks/replace",
+                Map.of(
+                        "search_text", searchText,
+                        "replacement_text", replacementText == null ? "" : replacementText,
+                        "case_sensitive", caseSensitive,
+                        "apply", apply
+                ),
+                tenantId, kbId, docId
+        );
+    }
+
     private Map<String, Object> metadataMutation(
             HttpMethod method, String path, Object body, Object... uriVariables
     ) {

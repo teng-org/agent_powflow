@@ -24,6 +24,7 @@ defineProps({
         <select v-model="kbState.chunkRun.chunk_method">
           <option value="sentence">sentence</option>
           <option value="fixed">fixed</option>
+          <option value="page">page</option>
           <option value="delimiter">delimiter</option>
         </select>
       </label>

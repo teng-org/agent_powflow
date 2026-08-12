@@ -346,6 +346,16 @@ public class WorkspaceKnowledgeBaseController {
         return executionClient.clearChunkDraft(claims.tenantId(), kbId, docId, chunkId);
     }
 
+    @PostMapping("/{kbId}/documents/{docId}/chunks/replace")
+    public Map<String, Object> replaceChunkText(@PathVariable String kbId, @PathVariable String docId,
+            @Valid @RequestBody DocumentMetadataDto.ChunkTextReplaceRequest request, Authentication authentication) {
+        TokenClaims claims = owned(authentication, kbId);
+        return executionClient.replaceChunkText(
+                claims.tenantId(), kbId, docId, request.search_text(), request.replacement_text(),
+                request.case_sensitive(), request.apply()
+        );
+    }
+
     private TaskDto.DocumentCommandAcceptedResponse documentCommand(String kbId, String docId, String command,
             TaskDto.DocumentCommandRequest request, String traceId, Authentication authentication) {
         TokenClaims claims = owned(authentication, kbId);

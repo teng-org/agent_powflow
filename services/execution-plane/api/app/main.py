@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
     MongoClient = None
 
 app = FastAPI(title="execution-api", version="0.4.0")
-SUPPORTED_CHUNK_METHODS = {"fixed", "sentence", "paragraph", "markdown", "delimiter"}
+SUPPORTED_CHUNK_METHODS = {"fixed", "sentence", "paragraph", "markdown", "delimiter", "page"}
 ADMIN_TOKEN = os.getenv("EXECUTION_ADMIN_TOKEN", "")
 CONTROL_PLANE_INTERNAL_TOKEN = os.getenv("CONTROL_PLANE_INTERNAL_TOKEN", "")
 ALERTMANAGER_WEBHOOK_TOKEN = os.getenv("ALERTMANAGER_WEBHOOK_TOKEN", "")
@@ -261,7 +261,7 @@ class ApiInternalTaskDispatchRequest(BaseModel):
     filename: str = Field(default="", max_length=512)
     command: str = Field(default="", max_length=32)
     content: str = ""
-    chunk_method: str = Field(default="fixed", pattern="^(fixed|sentence|paragraph|markdown|delimiter)$")
+    chunk_method: str = Field(default="fixed", pattern="^(fixed|sentence|paragraph|markdown|delimiter|page)$")
     chunk_delimiter: str | None = None
     chunk_size: int = Field(default=500, ge=100, le=2000)
     chunk_overlap: int = Field(default=50, ge=0, le=500)
@@ -314,6 +314,13 @@ class ApiReindexRequest(BaseModel):
 class ApiChunkDraftRequest(BaseModel):
     action: str = Field(pattern="^(delete|edit)$")
     text: str | None = Field(default=None, max_length=1_000_000)
+
+
+class ApiChunkTextReplaceRequest(BaseModel):
+    search_text: str = Field(min_length=1, max_length=10_000)
+    replacement_text: str = Field(default="", max_length=1_000_000)
+    case_sensitive: bool = True
+    apply: bool = False
 
 
 class ApiPoolUpsertRequest(BaseModel):
@@ -2122,7 +2129,9 @@ def _extract_text_from_file(filename: str, raw: bytes) -> str:
         parts: list[str] = []
         for page in reader.pages:
             parts.append(page.extract_text() or "")
-        return _strip_nul("\n".join(parts))
+        # Form-feed is the canonical page boundary used by page-aware
+        # chunking and by RAG citation metadata.
+        return _strip_nul("\f".join(parts))
     if ext == ".docx":
         doc = Document(io.BytesIO(raw))
         parts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
@@ -2933,7 +2942,7 @@ async def upload_documents(
             skipped.append({"filename": file.filename, "reason": "empty file"})
             continue
         try:
-            text = _extract_text_from_file(file.filename, raw).strip()
+            text = _extract_text_from_file(file.filename, raw)
         except HTTPException as exc:
             detail = exc.detail
             skipped_item = {
@@ -2951,7 +2960,7 @@ async def upload_documents(
         except Exception as exc:
             skipped.append({"filename": file.filename, "reason": f"parse failed: {exc}"})
             continue
-        if not text:
+        if not text.strip():
             skipped.append({"filename": file.filename, "reason": "no extractable text"})
             continue
         text_to_store = preprocess_text_for_chunk(text) if process_mode == "UPLOAD_AND_CLEAN" else text
@@ -5061,6 +5070,31 @@ async def clear_chunk_draft(kb_id: str, doc_id: str, chunk_id: str, request: Req
     return {"status": "ok", "deleted": chunk_id, "trace_id": request.state.trace_id}
 
 
+@app.post("/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/chunks/replace")
+async def replace_chunk_text(
+    kb_id: str,
+    doc_id: str,
+    body: ApiChunkTextReplaceRequest,
+    request: Request,
+    _: dict = Depends(require_kb_write),
+) -> Dict:
+    if not kb_store.get_document(request.state.tenant_id, kb_id, doc_id):
+        raise HTTPException(status_code=404, detail="document not found")
+    try:
+        result = kb_store.replace_text_in_chunk_drafts(
+            request.state.tenant_id,
+            kb_id,
+            doc_id,
+            body.search_text,
+            body.replacement_text,
+            case_sensitive=body.case_sensitive,
+            apply=body.apply,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok", **result, "trace_id": request.state.trace_id}
+
+
 @app.post("/api/v1/admin/kbs/{kb_id}/documents/{doc_id}/chunks/commit")
 async def commit_chunk_drafts(kb_id: str, doc_id: str, request: Request, _: dict = Depends(require_kb_write)) -> Dict:
     doc = kb_store.get_document(request.state.tenant_id, kb_id, doc_id)
@@ -6171,11 +6205,24 @@ async def list_document_chunks_internal(
     require_internal_token(request)
     if not kb_store.get_document(tenant_id, kb_id, doc_id):
         raise HTTPException(status_code=404, detail="document not found")
+    drafts = kb_store.list_chunk_drafts(tenant_id, kb_id, doc_id)
+    draft_map = {item["chunk_id"]: item for item in drafts}
+    chunks = kb_store.list_chunks(
+        tenant_id,
+        kb_id,
+        doc_id,
+        limit=min(max(int(limit), 1), 500),
+    )
+    for chunk in chunks:
+        draft = draft_map.get(chunk.get("chunk_id"))
+        if draft:
+            chunk["draft"] = draft
     return {
         "status": "ok",
         "kb_id": kb_id,
         "doc_id": doc_id,
-        "items": kb_store.list_chunks(tenant_id, kb_id, doc_id, limit=min(max(int(limit), 1), 500)),
+        "items": chunks,
+        "drafts": drafts,
         "trace_id": request.state.trace_id,
     }
 
@@ -6244,8 +6291,8 @@ async def stage_document_internal(
         )
     if not raw:
         raise HTTPException(status_code=400, detail={"code": "UPLOAD_FILE_EMPTY", "message": "empty file"})
-    text = _extract_text_from_file(filename, raw).strip()
-    if not text:
+    text = _extract_text_from_file(filename, raw)
+    if not text.strip():
         raise HTTPException(status_code=400, detail={"code": "UPLOAD_TEXT_EMPTY", "message": "no extractable text"})
     text_to_store = preprocess_text_for_chunk(text) if process_mode == "UPLOAD_AND_CLEAN" else text
     object_ref = await _persist_document_artifacts(
@@ -6351,6 +6398,32 @@ async def clear_chunk_draft_internal(
     if not deleted:
         raise HTTPException(status_code=404, detail="draft not found")
     return {"status": "ok", "deleted": chunk_id, "trace_id": request.state.trace_id}
+
+
+@app.post("/api/v1/internal/kbs/{tenant_id}/{kb_id}/documents/{doc_id}/chunks/replace")
+async def replace_chunk_text_internal(
+    tenant_id: str,
+    kb_id: str,
+    doc_id: str,
+    body: ApiChunkTextReplaceRequest,
+    request: Request,
+) -> Dict:
+    require_internal_token(request)
+    if not kb_store.get_document(tenant_id, kb_id, doc_id):
+        raise HTTPException(status_code=404, detail="document not found")
+    try:
+        result = kb_store.replace_text_in_chunk_drafts(
+            tenant_id,
+            kb_id,
+            doc_id,
+            body.search_text,
+            body.replacement_text,
+            case_sensitive=body.case_sensitive,
+            apply=body.apply,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok", **result, "trace_id": request.state.trace_id}
 
 
 @app.delete("/api/v1/internal/kbs/{tenant_id}/{kb_id}/documents/{doc_id}/staging")

@@ -16,6 +16,10 @@ const props = defineProps({
 })
 const emit = defineEmits(['notify'])
 const workspaceRoot = ref(null)
+const knowledgeWorkbenchFrame = ref(null)
+const knowledgeWorkbenchLoading = ref(false)
+const knowledgeWorkbenchError = ref('')
+let knowledgeWorkbenchLoadTimer = null
 
 const state = reactive({
   loading: false,
@@ -36,6 +40,8 @@ const state = reactive({
   members: [],
   invitations: [],
   activeKbId: '',
+  activeKbWorkbenchId: '',
+  activeKbWorkbenchView: 'docs',
   activeWorkflowId: '',
   uploadFiles: [],
   revealedSecret: '',
@@ -109,6 +115,16 @@ const editingKnowledgeBase = computed(() => state.knowledgeBases.find((item) => 
 const activeAgent = computed(() => state.agents.find((item) => item.agent_id === state.activeAgentId) || null)
 const activeWorkflow = computed(() => state.workflows.find((item) => item.workflow_id === state.activeWorkflowId) || null)
 const activeDeployment = computed(() => state.deployments.find((item) => item.deployment_id === state.activeDeploymentId) || null)
+const activeKnowledgeWorkbench = computed(() => state.knowledgeBases.find((item) => item.kb_id === state.activeKbWorkbenchId) || null)
+const knowledgeWorkbenchUrl = computed(() => {
+  if (!state.activeKbWorkbenchId) return ''
+  const session = btoa(unescape(encodeURIComponent(JSON.stringify({
+    token: props.token,
+    kbId: state.activeKbWorkbenchId,
+    appearance: props.appearance,
+  }))))
+  return `${managerOrigin()}/kb-workbench/?kb=${encodeURIComponent(state.activeKbWorkbenchId)}&source=workspace&view=${encodeURIComponent(state.activeKbWorkbenchView)}&embedded=1&appearance=${encodeURIComponent(props.appearance)}#session=${encodeURIComponent(session)}`
+})
 
 const deploymentStatusText = (status) => ({ ACTIVE: '运行中', PAUSED: '已暂停', ARCHIVED: '已归档' }[status] || status)
 const invocationStatusText = (status) => ({ ACCEPTING: '接收中', ACCEPTED: '处理中', COMPLETED: '已完成', FAILED: '失败', CANCELLED: '已取消', REJECTED: '已拒绝', RATE_LIMITED: '已限流' }[status] || status)
@@ -308,27 +324,65 @@ function avatarLabel(item) {
 function visibilityLabel(value) { return value === 'WORKSPACE' ? '工作空间可见' : '仅自己可见' }
 function formatDate(value) { return value ? new Date(value).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' }) : '刚刚' }
 
-const managerWindows = new Map()
 function normalizedOrigin(value, fallback) {
   try { return new URL(String(value || fallback), window.location.origin).origin } catch { return fallback }
 }
 function managerOrigin() {
-  return normalizedOrigin(import.meta.env.VITE_PUBLIC_KB_ORIGIN, `${window.location.protocol}//${window.location.hostname}:5180`)
+  return window.location.origin
 }
-function openKnowledgeManager(item, view = 'docs') {
-  const url = `${managerOrigin()}/?kb=${encodeURIComponent(item.kb_id)}&source=workspace&view=${encodeURIComponent(view)}`
-  const popup = window.open(url, `powflow-kb-${item.kb_id}`)
-  if (!popup) {
-    emit('notify', { type: 'warning', title: '新窗口被浏览器拦截', message: '请允许此站点打开窗口后重试。' })
-    return
-  }
-  managerWindows.set(popup, item.kb_id)
+function knowledgeManagerUrl(item, view = 'docs') {
+  return `${managerOrigin()}/kb-workbench/?kb=${encodeURIComponent(item.kb_id)}&source=workspace&view=${encodeURIComponent(view)}`
+}
+
+function openKnowledgeWorkbench(item, view = 'docs') {
+  state.activeKbWorkbenchId = item.kb_id
+  state.activeKbWorkbenchView = view
+  knowledgeWorkbenchLoading.value = true
+  knowledgeWorkbenchError.value = ''
+  if (knowledgeWorkbenchLoadTimer) window.clearTimeout(knowledgeWorkbenchLoadTimer)
+  knowledgeWorkbenchLoadTimer = window.setTimeout(() => {
+    if (!knowledgeWorkbenchLoading.value || !state.activeKbWorkbenchId) return
+    knowledgeWorkbenchError.value = '知识库工作台加载超时，请返回后重试。'
+  }, 15000)
+  nextTick(() => workspaceRoot.value?.scrollTo({ top: 0, behavior: 'auto' }))
+}
+
+function closeKnowledgeWorkbench() {
+  state.activeKbWorkbenchId = ''
+  state.activeKbWorkbenchView = 'docs'
+  knowledgeWorkbenchLoading.value = false
+  knowledgeWorkbenchError.value = ''
+  if (knowledgeWorkbenchLoadTimer) window.clearTimeout(knowledgeWorkbenchLoadTimer)
+  knowledgeWorkbenchLoadTimer = null
+}
+
+function sendKnowledgeWorkbenchAuth() {
+  const target = knowledgeWorkbenchFrame.value?.contentWindow
+  if (!target || !state.activeKbWorkbenchId) return
+  target.postMessage({
+    type: 'powflow-kb-auth', token: props.token, kbId: state.activeKbWorkbenchId,
+    appearance: props.appearance, controlPlaneBaseUrl: '/control',
+  }, managerOrigin())
+}
+
+function onKnowledgeWorkbenchFrameLoad() {
+  knowledgeWorkbenchLoading.value = true
+  knowledgeWorkbenchError.value = ''
+  sendKnowledgeWorkbenchAuth()
 }
 
 function handleManagerMessage(event) {
-  if (event.origin !== managerOrigin() || event.data?.type !== 'powflow-kb-ready') return
-  const kbId = managerWindows.get(event.source)
-  if (!kbId) return
+  if (event.origin !== managerOrigin() || !['powflow-kb-ready', 'powflow-kb-mounted'].includes(event.data?.type)) return
+  const kbId = String(event.data?.kbId || '')
+  if (!kbId || kbId !== state.activeKbWorkbenchId || !event.source) return
+  if (knowledgeWorkbenchFrame.value?.contentWindow && event.source !== knowledgeWorkbenchFrame.value.contentWindow) return
+  if (event.data?.type === 'powflow-kb-mounted') {
+    knowledgeWorkbenchLoading.value = false
+    knowledgeWorkbenchError.value = ''
+    if (knowledgeWorkbenchLoadTimer) window.clearTimeout(knowledgeWorkbenchLoadTimer)
+    knowledgeWorkbenchLoadTimer = null
+    return
+  }
   event.source.postMessage({
     type: 'powflow-kb-auth', token: props.token, kbId, appearance: props.appearance,
     controlPlaneBaseUrl: '/control',
@@ -718,17 +772,49 @@ async function copy(value) {
 }
 
 watch(() => props.page, (page) => {
-  state.error = ''; state.message = ''; state.revealedSecret = ''; state.revealedInvitation = ''; state.activeAgentId = ''; state.activeWorkflowId = ''; state.activeDeploymentId = ''; state.deploymentModalOpen = false
+  state.error = ''; state.message = ''; state.revealedSecret = ''; state.revealedInvitation = ''; state.activeKbWorkbenchId = ''; state.activeAgentId = ''; state.activeWorkflowId = ''; state.activeDeploymentId = ''; state.deploymentModalOpen = false
   if (page === 'deployments') loadDeploymentSummaries()
 })
 onMounted(() => { window.addEventListener('message', handleManagerMessage); refresh() })
-onBeforeUnmount(() => window.removeEventListener('message', handleManagerMessage))
+onBeforeUnmount(() => {
+  window.removeEventListener('message', handleManagerMessage)
+  if (knowledgeWorkbenchLoadTimer) window.clearTimeout(knowledgeWorkbenchLoadTimer)
+})
 </script>
 
 <template>
   <main ref="workspaceRoot" class="asset-workspace" :class="`theme-${appearance}`">
+    <section v-if="page === 'knowledge' && activeKnowledgeWorkbench" class="knowledge-workbench-shell">
+      <header class="knowledge-workbench-header">
+        <button class="workbench-back" type="button" @click="closeKnowledgeWorkbench">←</button>
+        <div>
+          <span class="asset-eyebrow">知识库工作台</span>
+          <h1>{{ activeKnowledgeWorkbench.name }}</h1>
+        </div>
+      </header>
+      <iframe
+        ref="knowledgeWorkbenchFrame"
+        class="knowledge-workbench-frame"
+        :src="knowledgeWorkbenchUrl"
+        title="知识库工作台"
+        allow="clipboard-read; clipboard-write"
+        @load="onKnowledgeWorkbenchFrameLoad"
+      ></iframe>
+      <div
+        v-if="knowledgeWorkbenchLoading || knowledgeWorkbenchError"
+        class="knowledge-workbench-loading"
+        :class="{ 'is-error': !!knowledgeWorkbenchError }"
+        role="status"
+        aria-live="polite"
+      >
+        <span v-if="!knowledgeWorkbenchError" class="knowledge-workbench-spinner" aria-hidden="true"></span>
+        <strong>{{ knowledgeWorkbenchError || '正在加载知识库工作台' }}</strong>
+        <small v-if="!knowledgeWorkbenchError">正在同步控制台账户与知识库权限…</small>
+        <button v-else class="asset-button ghost" type="button" @click="closeKnowledgeWorkbench">返回知识库</button>
+      </div>
+    </section>
     <AgentWorkbench
-      v-if="page === 'agents' && activeAgent"
+      v-else-if="page === 'agents' && activeAgent"
       :agent="activeAgent"
       :base-url="baseUrl"
       :chat-base-url="chatBaseUrl"
@@ -808,14 +894,14 @@ onBeforeUnmount(() => window.removeEventListener('message', handleManagerMessage
           </div>
           <h3>{{ item.name }}</h3><p>{{ item.description || item.summary || '还没有描述，编辑知识库补充用途说明。' }}</p>
           <div class="kb-tags"><span v-for="tag in item.tags || []" :key="tag">#{{ tag }}</span></div>
-          <button class="kb-rag-status" :class="`is-${item.ragState.tone}`" type="button" @click="openKnowledgeManager(item, 'rag')"><span class="kb-rag-signal"><i></i><i></i><i></i></span><span><strong>{{ item.ragState.label }}</strong><small>{{ item.ragRevision || item.ragState.detail }}</small></span><b>查看 ›</b></button>
+          <button class="kb-rag-status" :class="`is-${item.ragState.tone}`" type="button" @click="openKnowledgeWorkbench(item, 'rag')"><span class="kb-rag-signal"><i></i><i></i><i></i></span><span><strong>{{ item.ragState.label }}</strong><small>{{ item.ragRevision || item.ragState.detail }}</small></span><b>查看 ›</b></button>
           <dl class="kb-metrics"><div><dt>文档</dt><dd>{{ item.documentCount }}</dd></div><div><dt>切片</dt><dd>{{ item.chunkCount }}</dd></div><div><dt>已就绪</dt><dd>{{ item.readyCount }}</dd></div></dl>
-          <footer><span>更新于 {{ formatDate(item.updated_at) }}</span><span class="card-actions"><button class="asset-link" @click="openEditKnowledgeBase(item)">编辑</button><button class="asset-link" @click="openKnowledgeManager(item)">管理文档</button><button class="asset-link danger" @click="state.kbDeletingId = item.kb_id">删除</button></span></footer>
+          <footer><span>更新于 {{ formatDate(item.updated_at) }}</span><span class="card-actions"><button class="asset-link" @click="openEditKnowledgeBase(item)">编辑</button><button class="asset-link" @click="openKnowledgeWorkbench(item)">管理文档</button><button class="asset-link danger" @click="state.kbDeletingId = item.kb_id">删除</button></span></footer>
         </article>
       </section>
 
       <section v-else class="kb-table-shell">
-        <table class="kb-table"><thead><tr><th>知识库</th><th>权限与状态</th><th>标签</th><th>文档</th><th>切片</th><th>检索状态</th><th>更新时间</th><th></th></tr></thead><tbody><tr v-for="item in knowledgeRecords" :key="item.kb_id" :class="{ 'is-frozen': item.frozen }"><td><span class="kb-table-name"><span class="kb-avatar small" :class="{ 'is-frozen': item.frozen }" :style="avatarStyle(item)">{{ avatarLabel(item) }}</span><span><strong>{{ item.name }}</strong><small>{{ item.description || '暂无描述' }}</small></span></span></td><td><span class="kb-table-state"><span class="asset-pill">{{ visibilityLabel(item.visibility) }}</span><span v-if="item.frozen" class="kb-freeze-pill"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M5 7V5.5a3 3 0 0 1 6 0V7m-7 0h8v6H4z" /></svg>已冻结</span></span></td><td><span class="kb-tags"><span v-for="tag in (item.tags || []).slice(0, 3)" :key="tag">#{{ tag }}</span><small v-if="!item.tags?.length">—</small></span></td><td>{{ item.documentCount }}</td><td>{{ item.chunkCount }}</td><td><button class="kb-table-rag" :class="`is-${item.ragState.tone}`" @click="openKnowledgeManager(item, 'rag')"><i></i>{{ item.ragState.label }}</button></td><td>{{ formatDate(item.updated_at) }}</td><td><span class="card-actions"><button class="asset-link" @click="openKnowledgeManager(item)">管理</button><button class="asset-link" @click="openEditKnowledgeBase(item)">编辑</button><button class="asset-link danger" @click="state.kbDeletingId = item.kb_id">删除</button></span></td></tr></tbody></table>
+        <table class="kb-table"><thead><tr><th>知识库</th><th>权限与状态</th><th>标签</th><th>文档</th><th>切片</th><th>检索状态</th><th>更新时间</th><th></th></tr></thead><tbody><tr v-for="item in knowledgeRecords" :key="item.kb_id" :class="{ 'is-frozen': item.frozen }"><td><span class="kb-table-name"><span class="kb-avatar small" :class="{ 'is-frozen': item.frozen }" :style="avatarStyle(item)">{{ avatarLabel(item) }}</span><span><strong>{{ item.name }}</strong><small>{{ item.description || '暂无描述' }}</small></span></span></td><td><span class="kb-table-state"><span class="asset-pill">{{ visibilityLabel(item.visibility) }}</span><span v-if="item.frozen" class="kb-freeze-pill"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M5 7V5.5a3 3 0 0 1 6 0V7m-7 0h8v6H4z" /></svg>已冻结</span></span></td><td><span class="kb-tags"><span v-for="tag in (item.tags || []).slice(0, 3)" :key="tag">#{{ tag }}</span><small v-if="!item.tags?.length">—</small></span></td><td>{{ item.documentCount }}</td><td>{{ item.chunkCount }}</td><td><button class="kb-table-rag" :class="`is-${item.ragState.tone}`" @click="openKnowledgeWorkbench(item, 'rag')"><i></i>{{ item.ragState.label }}</button></td><td>{{ formatDate(item.updated_at) }}</td><td><span class="card-actions"><button class="asset-link" @click="openKnowledgeWorkbench(item)">管理</button><button class="asset-link" @click="openEditKnowledgeBase(item)">编辑</button><button class="asset-link danger" @click="state.kbDeletingId = item.kb_id">删除</button></span></td></tr></tbody></table>
         <div v-if="!knowledgeRecords.length" class="asset-empty">还没有知识库，点击右上角开始创建。</div>
       </section>
 
@@ -919,6 +1005,7 @@ onBeforeUnmount(() => window.removeEventListener('message', handleManagerMessage
 </template>
 
 <style scoped>
+.knowledge-workbench-shell{position:relative;display:grid;grid-template-rows:auto minmax(680px,1fr);height:calc(100vh - 48px);min-height:760px;margin:-24px}.knowledge-workbench-header{display:flex;align-items:center;gap:14px;padding:12px 18px;border-bottom:1px solid rgba(127,127,127,.16);background:var(--workspace-bg,#090a0c)}.knowledge-workbench-header h1{margin:2px 0 0;font-size:18px}.knowledge-workbench-frame{display:block;width:100%;height:100%;min-height:680px;border:0;background:var(--workspace-bg,#090a0c)}.knowledge-workbench-loading{position:absolute;inset:76px 0 0;display:grid;place-content:center;justify-items:center;gap:10px;color:var(--workspace-text);background:var(--workspace-bg,#090a0c);z-index:3}.knowledge-workbench-loading small{color:var(--workspace-muted)}.knowledge-workbench-spinner{width:28px;height:28px;border:2px solid rgba(127,127,127,.22);border-top-color:#2991ff;border-radius:50%;animation:spin .8s linear infinite}.knowledge-workbench-loading.is-error{color:#ff6b75}
 .asset-workspace{min-width:0;height:100vh;overflow:auto;padding:clamp(22px,4vw,56px);background:var(--workspace-bg,#f5f5f7);color:var(--workspace-text,#1d1d1f)}
 .asset-header{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin:0 auto 28px;max-width:1240px}.asset-header h1{margin:5px 0 8px;font-size:clamp(30px,4vw,48px);line-height:1.05;letter-spacing:-.035em}.asset-header p,.asset-panel p{margin:0;color:var(--workspace-muted,#6e6e73);line-height:1.6}.asset-eyebrow{color:#0071e3;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 .asset-banner,.secret-reveal{max-width:1240px;margin:0 auto 18px;padding:14px 18px;border-radius:16px}.asset-banner.error{background:#fff0f0;color:#a61b1b}.asset-banner.success{background:#eaf8ef;color:#17663a}

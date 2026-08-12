@@ -3,8 +3,8 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import RagIndexWorkbench from './components/RagIndexWorkbench.vue'
 
 const config = reactive({
-  executionBaseUrl: '/execution',
-  controlPlaneBaseUrl: '/control',
+  executionBaseUrl: '/kb-workbench/execution',
+  controlPlaneBaseUrl: '/kb-workbench/control',
   tenantId: 'platform',
   actorId: 'kb-admin',
   sourceService: 'kb-admin-web',
@@ -18,8 +18,11 @@ const role = ref('')
 const loginError = ref('')
 const streamConnected = ref(false)
 let taskStream = null
+let taskPollTimer = null
+let taskPollBusy = false
 const notices = ref([])
 const integratedMode = ref(new URLSearchParams(window.location.search).get('source') === 'workspace')
+const embeddedMode = ref(new URLSearchParams(window.location.search).get('embedded') === '1')
 const requestedKbId = ref(new URLSearchParams(window.location.search).get('kb') || '')
 const requestedWorkbenchView = ref(new URLSearchParams(window.location.search).get('view') || '')
 const taskStatusMap = ref({})
@@ -31,6 +34,9 @@ const retryLockedBatchIds = ref({})
 const taskNameByTaskId = ref({})
 let docsRefreshTimer = null
 let kbsRefreshTimer = null
+let workspaceAuthTimer = null
+let workspaceAuthTimeout = null
+let workspaceAuthConnecting = false
 let noticeSeq = 0
 const UI_PREFS_KEY = 'kb-admin-ui-prefs-v1'
 let uiPrefsLoaded = false
@@ -42,6 +48,7 @@ const ui = reactive({
   showRenameKbModal: false,
   showUploadModal: false,
   showCommitConfirmModal: false,
+  showChunkReplaceModal: false,
   showDocDeleteCommitModal: false,
   showDeleteKbConfirmModal: false,
   showKbAccessModal: false,
@@ -84,6 +91,12 @@ const uploadInputRef = ref(null)
 const uploadQueue = ref([])
 const uploadLimitMb = ref(50)
 const editDraftForm = reactive({ chunk_id: '', text: '' })
+const chunkReplaceForm = reactive({
+  search_text: '',
+  replacement_text: '',
+  case_sensitive: true,
+  preview: null,
+})
 const dragActive = ref(false)
 const pendingDocDeletes = ref({})
 
@@ -138,6 +151,8 @@ const loading = reactive({
   commitDocDelete: false,
   upload: false,
   commit: false,
+  replacePreview: false,
+  replaceApply: false,
   clearTasks: false,
 })
 
@@ -1248,9 +1263,13 @@ function isDelimiterMethod(method) {
   return String(method || '').toLowerCase() === 'delimiter'
 }
 
+function usesChunkWindow(method) {
+  return !['delimiter', 'page'].includes(String(method || '').trim().toLowerCase())
+}
+
 function chunkMethodLabel(method) {
   const value = String(method || '').trim().toLowerCase()
-  return ({ fixed: '定长', sentence: '句子', paragraph: '段落', markdown: 'Markdown 结构', delimiter: '分隔符' })[value] || '句子'
+  return ({ fixed: '定长', sentence: '句子', paragraph: '段落', markdown: 'Markdown 结构', delimiter: '分隔符', page: '按页' })[value] || '句子'
 }
 
 function sanitizeChunkNumber(value, fallback) {
@@ -1508,8 +1527,9 @@ async function callApi(path, options = {}) {
   const isKbRequest = pathname === '/api/v1/admin/kbs' || pathname.startsWith('/api/v1/admin/kbs/')
   const isKbAuthorityRead = pathname === '/api/v1/admin/kbs' || /\/bindings(?:\/[^/]+)?$/.test(pathname)
   const isKbWrite = isKbRequest && !['GET', 'HEAD', 'OPTIONS'].includes(method)
+  const isTaskRequest = pathname === '/api/v1/admin/tasks' || pathname.startsWith('/api/v1/admin/tasks/')
 
-  if ((integratedMode.value && isKbRequest) || isKbAuthorityRead || isKbWrite) {
+  if ((integratedMode.value && (isKbRequest || isTaskRequest)) || isKbAuthorityRead || isKbWrite) {
     if (!controlPlaneToken.value) await ensureControlPlaneToken()
     const headers = new Headers(options.headers || {})
     headers.set('Authorization', `Bearer ${controlPlaneToken.value}`)
@@ -1518,9 +1538,11 @@ async function callApi(path, options = {}) {
     headers.set('X-Source-Service', config.sourceService)
     if (config.traceId.trim()) headers.set('X-Trace-Id', config.traceId.trim())
     else headers.delete('X-Trace-Id')
-    const workspacePath = integratedMode.value
+    const workspacePath = integratedMode.value && isKbRequest
       ? path.replace('/api/v1/admin/kbs', '/api/v1/knowledge-bases')
-      : path
+      : integratedMode.value && isTaskRequest
+        ? path.replace('/api/v1/admin/tasks', '/api/v1/tasks')
+        : path
     return await callControlApi(workspacePath, { ...options, headers })
   }
 
@@ -2036,7 +2058,6 @@ async function loadDocs() {
 }
 
 async function loadTasks() {
-  if (integratedMode.value) { tasks.value = []; return }
   loading.tasks = true
   try {
     const kbQ = selectedKbId.value ? `?kb_id=${encodeURIComponent(selectedKbId.value)}&limit=100` : '?limit=100'
@@ -2045,6 +2066,30 @@ async function loadTasks() {
   } finally {
     loading.tasks = false
   }
+}
+
+function stopTaskPolling() {
+  if (taskPollTimer) {
+    clearInterval(taskPollTimer)
+    taskPollTimer = null
+  }
+  taskPollBusy = false
+}
+
+function startTaskPolling() {
+  stopTaskPolling()
+  if (!integratedMode.value || !token.value) return
+  taskPollTimer = window.setInterval(async () => {
+    if (taskPollBusy || !token.value) return
+    taskPollBusy = true
+    try {
+      await loadTasks()
+    } catch {
+      // Keep the last successful snapshot during a transient network failure.
+    } finally {
+      taskPollBusy = false
+    }
+  }, 1500)
 }
 
 async function clearTasks() {
@@ -2637,7 +2682,10 @@ async function setDraftDelete(chunkId) {
       body: JSON.stringify({ action: 'delete' }),
     },
   )
+  const target = chunks.value.find((item) => item.chunk_id === chunkId)
+  if (target) target.draft = { action: 'delete', text: '' }
   await loadChunks()
+  pushNotice('info', '切片已标记为预删除，提交修改后生效')
 }
 
 async function setDraftEdit(chunkId) {
@@ -2662,7 +2710,67 @@ async function clearDraft(chunkId) {
       headers: withHeaders(),
     },
   )
+  const target = chunks.value.find((item) => item.chunk_id === chunkId)
+  if (target) delete target.draft
   await loadChunks()
+  pushNotice('success', '已取消切片预删除')
+}
+
+function openChunkReplaceModal() {
+  chunkReplaceForm.search_text = chunkSearch.value || ''
+  chunkReplaceForm.replacement_text = ''
+  chunkReplaceForm.case_sensitive = chunkSearchCaseSensitive.value
+  chunkReplaceForm.preview = null
+  ui.showChunkReplaceModal = true
+}
+
+function closeChunkReplaceModal() {
+  if (loading.replacePreview || loading.replaceApply) return
+  ui.showChunkReplaceModal = false
+  chunkReplaceForm.preview = null
+}
+
+async function requestChunkReplacement(apply) {
+  if (!String(chunkReplaceForm.search_text || '').length) {
+    pushNotice('info', '请输入要查找的文本')
+    return
+  }
+  const loadingKey = apply ? 'replaceApply' : 'replacePreview'
+  loading[loadingKey] = true
+  try {
+    const data = await callApi(
+      `/api/v1/admin/kbs/${encodeURIComponent(selectedKbId.value)}/documents/${encodeURIComponent(selectedDocId.value)}/chunks/replace`,
+      {
+        method: 'POST',
+        headers: withHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          search_text: chunkReplaceForm.search_text,
+          replacement_text: chunkReplaceForm.replacement_text,
+          case_sensitive: chunkReplaceForm.case_sensitive,
+          apply,
+        }),
+      },
+    )
+    chunkReplaceForm.preview = data
+    if (!apply) return
+    await loadChunks()
+    if (Number(data.staged_chunks || 0) > 0) {
+      pushNotice('success', `已将 ${data.staged_chunks} 个切片加入待编辑，共替换 ${data.match_count} 处文本`)
+      ui.showChunkReplaceModal = false
+    } else {
+      pushNotice('info', '没有可加入待编辑的匹配内容')
+    }
+  } finally {
+    loading[loadingKey] = false
+  }
+}
+
+async function previewChunkReplacement() {
+  await requestChunkReplacement(false)
+}
+
+async function applyChunkReplacement() {
+  await requestChunkReplacement(true)
 }
 
 async function commitDrafts() {
@@ -2782,7 +2890,12 @@ async function saveChunkDraftFromModal() {
 async function refreshAll() {
   await loadKbs()
   await loadDocs()
-  if (!integratedMode.value) await loadTasks()
+  try {
+    await loadTasks()
+  } catch {
+    // Task observability must not block access to an otherwise authorized KB.
+    tasks.value = []
+  }
   await loadUploadSettings()
   if (selectedDocId.value && ui.currentView === 'chunks') await loadChunks()
 }
@@ -2802,6 +2915,13 @@ function chunkDraftCardClass(chunk) {
 watch([chunkSearch, chunkSearchCaseSensitive, chunks], () => {
   activeChunkMatchIndex.value = 0
 })
+
+watch(
+  () => [chunkReplaceForm.search_text, chunkReplaceForm.replacement_text, chunkReplaceForm.case_sensitive],
+  () => {
+    chunkReplaceForm.preview = null
+  },
+)
 
 watch(activeChunkMatchId, (next) => {
   if (next) focusChunkCard(next)
@@ -2849,16 +2969,66 @@ onMounted(() => {
   loadUiPrefs()
   token.value = ''
   role.value = ''
-  if (integratedMode.value && window.opener) {
+  if (integratedMode.value && embeddedMode.value && initializeEmbeddedSession()) return
+  if (integratedMode.value && authHostWindow()) {
     window.addEventListener('message', receiveWorkspaceAuth)
-    window.opener.postMessage({ type: 'powflow-kb-ready' }, '*')
+    requestWorkspaceAuth()
+    workspaceAuthTimer = window.setInterval(() => {
+      if (token.value || !authHostWindow()) {
+        window.clearInterval(workspaceAuthTimer)
+        workspaceAuthTimer = null
+        return
+      }
+      requestWorkspaceAuth()
+    }, 1200)
+    workspaceAuthTimeout = window.setTimeout(() => {
+      if (!token.value && !workspaceAuthConnecting) {
+        if (workspaceAuthTimer) window.clearInterval(workspaceAuthTimer)
+        workspaceAuthTimer = null
+        loginError.value = '控制台账户连接超时，请关闭此页面并从控制台重新进入。'
+      }
+    }, 12000)
   } else if (integratedMode.value) {
     loginError.value = '此访问链接没有有效的控制台会话，请从控制台重新打开。'
   }
 })
 
+function initializeEmbeddedSession() {
+  const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+  const encoded = fragment.get('session')
+  if (!encoded) {
+    loginError.value = '控制台没有提供有效的知识库会话，请返回后重试。'
+    return false
+  }
+  try {
+    const payload = JSON.parse(decodeURIComponent(escape(atob(encoded))))
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+    const sessionToken = String(payload?.token || '')
+    if (!sessionToken) throw new Error('missing token')
+    receiveWorkspaceSession({
+      token: sessionToken,
+      kbId: String(payload?.kbId || requestedKbId.value),
+      appearance: payload?.appearance,
+      controlPlaneBaseUrl: '/control',
+    })
+    return true
+  } catch {
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+    loginError.value = '知识库会话解析失败，请返回控制台重试。'
+    return false
+  }
+}
+
 onBeforeUnmount(() => {
   window.removeEventListener('message', receiveWorkspaceAuth)
+  if (workspaceAuthTimer) {
+    window.clearInterval(workspaceAuthTimer)
+    workspaceAuthTimer = null
+  }
+  if (workspaceAuthTimeout) {
+    window.clearTimeout(workspaceAuthTimeout)
+    workspaceAuthTimeout = null
+  }
   if (docsRefreshTimer) {
     clearTimeout(docsRefreshTimer)
     docsRefreshTimer = null
@@ -2872,7 +3042,21 @@ onBeforeUnmount(() => {
     chunkHoverTimer = null
   }
   disconnectTaskStream()
+  stopTaskPolling()
 })
+
+function requestWorkspaceAuth() {
+  const host = authHostWindow()
+  if (host) {
+    host.postMessage({ type: 'powflow-kb-ready', kbId: requestedKbId.value }, '*')
+  }
+}
+
+function authHostWindow() {
+  if (embeddedMode.value && window.parent && window.parent !== window) return window.parent
+  if (window.opener && !window.opener.closed) return window.opener
+  return null
+}
 
 async function receiveWorkspaceAuth(event) {
   const configuredOrigins = [import.meta.env.VITE_PUBLIC_CONSOLE_ORIGIN, import.meta.env.VITE_PUBLIC_ADMIN_ORIGIN]
@@ -2883,19 +3067,45 @@ async function receiveWorkspaceAuth(event) {
     `${window.location.protocol}//${window.location.hostname}:5173`,
     `${window.location.protocol}//${window.location.hostname}:5174`,
   ])
-  if (!allowed.has(event.origin) || event.source !== window.opener || event.data?.type !== 'powflow-kb-auth') return
-  controlPlaneToken.value = String(event.data.token || '')
+  let sameDeploymentHost = false
+  try {
+    const sender = new URL(event.origin)
+    sameDeploymentHost = ['http:', 'https:'].includes(sender.protocol) && sender.hostname === window.location.hostname
+  } catch {
+    sameDeploymentHost = false
+  }
+  if ((!allowed.has(event.origin) && !sameDeploymentHost) || event.source !== authHostWindow() || event.data?.type !== 'powflow-kb-auth') return
+  await receiveWorkspaceSession(event.data)
+}
+
+async function receiveWorkspaceSession(session) {
+  if (workspaceAuthConnecting || token.value) return
+  workspaceAuthConnecting = true
+  controlPlaneToken.value = String(session.token || '')
   token.value = controlPlaneToken.value
-  requestedKbId.value = String(event.data.kbId || requestedKbId.value)
-  config.controlPlaneBaseUrl = String(event.data.controlPlaneBaseUrl || config.controlPlaneBaseUrl).replace(/\/$/, '')
-  document.documentElement.dataset.theme = event.data.appearance === 'light' ? 'light' : 'dark'
+  if (workspaceAuthTimer) {
+    window.clearInterval(workspaceAuthTimer)
+    workspaceAuthTimer = null
+  }
+  if (workspaceAuthTimeout) {
+    window.clearTimeout(workspaceAuthTimeout)
+    workspaceAuthTimeout = null
+  }
+  requestedKbId.value = String(session.kbId || requestedKbId.value)
+  config.controlPlaneBaseUrl = String(session.controlPlaneBaseUrl || config.controlPlaneBaseUrl).replace(/\/$/, '')
+  document.documentElement.dataset.theme = session.appearance === 'light' ? 'light' : 'dark'
   role.value = 'WORKSPACE_USER'
   try {
     await refreshAll()
+    startTaskPolling()
+    authHostWindow()?.postMessage({ type: 'powflow-kb-mounted', kbId: requestedKbId.value }, '*')
     pushNotice('success', '已连接到控制台账户')
   } catch {
     loginError.value = '无法打开此知识库，请返回控制台检查权限。'
     token.value = ''
+    controlPlaneToken.value = ''
+    workspaceAuthConnecting = false
+    window.setTimeout(requestWorkspaceAuth, 1500)
   }
 }
 
@@ -2983,7 +3193,7 @@ function addUploadFiles(files) {
     </div>
   </div>
 
-  <div v-else class="page admin-layout" :class="{ 'integrated-kb': integratedMode }">
+  <div v-else class="page admin-layout" :class="{ 'integrated-kb': integratedMode, 'embedded-kb': embeddedMode }">
     <div class="notice-stack">
       <div v-for="notice in notices" :key="notice.id" class="notice" :class="`notice-${notice.type}`">
         {{ notice.message }}
@@ -3082,7 +3292,7 @@ function addUploadFiles(files) {
     </aside>
 
     <section class="card panel fade-up kb-main-panel" style="animation-delay: 0.08s">
-      <header class="kb-page-header">
+      <header v-if="!embeddedMode" class="kb-page-header">
         <div class="kb-page-title">
           <div class="kb-page-context">
             <button class="kb-back-link" type="button" @click="returnToWorkspaceConsole">‹ 返回控制台</button>
@@ -3105,14 +3315,30 @@ function addUploadFiles(files) {
         </div>
       </header>
 
-      <nav v-if="ui.currentView !== 'chunks'" class="kb-workbench-tabs" aria-label="知识库工作区">
-        <button type="button" :class="{ active: ui.currentView === 'docs' }" @click="ui.currentView = 'docs'">文档</button>
-        <button type="button" :class="{ active: ui.currentView === 'rag' }" @click="ui.currentView = 'rag'">检索与索引</button>
-      </nav>
+      <div v-if="ui.currentView !== 'chunks'" class="kb-workbench-command-row">
+        <nav class="kb-workbench-tabs" aria-label="知识库工作区">
+          <button type="button" :class="{ active: ui.currentView === 'docs' }" @click="ui.currentView = 'docs'">文档</button>
+          <button type="button" :class="{ active: ui.currentView === 'rag' }" @click="ui.currentView = 'rag'">检索与索引</button>
+        </nav>
 
-      <div class="kb-view-heading">
-        <div><span>{{ ui.currentView === 'docs' ? '文档' : ui.currentView === 'rag' ? 'RAG 2.0' : '切片' }}</span><h2>{{ ui.currentView === 'docs' ? '文档列表' : ui.currentView === 'rag' ? '检索与索引' : (selectedDoc?.filename || '文档切片') }}</h2></div>
-        <button v-if="ui.currentView === 'docs'" class="btn primary" :disabled="!selectedKbId" @click="openUploadModal">上传文档</button>
+        <div v-if="embeddedMode" class="kb-embedded-toolbar" aria-label="知识库快捷操作">
+          <div class="kb-page-stats" aria-label="知识库统计">
+            <span><strong>{{ selectedKbDocumentCount }}</strong> 个文档</span>
+            <span class="kb-stat-chunks"><strong>{{ selectedKbChunkCount }}</strong> 个切片</span>
+            <span class="kb-stat-status" :class="{ frozen: selectedKb?.frozen }">{{ selectedKb?.frozen ? '已冻结' : '可用' }}</span>
+          </div>
+          <div class="kb-embedded-actions">
+            <button class="btn ghost" :disabled="!selectedKb" @click="setKbFrozen(selectedKb, !selectedKb?.frozen)">{{ selectedKb?.frozen ? '解冻' : '冻结' }}</button>
+            <button class="btn ghost" :disabled="!selectedKb || selectedKbDocumentCount <= 0" @click="summarizeKb(selectedKb)">生成摘要</button>
+            <button class="btn ghost kb-refresh-action" title="刷新知识库数据" aria-label="刷新知识库数据" @click="refreshAll">刷新</button>
+            <button v-if="ui.currentView === 'docs'" class="btn primary" :disabled="!selectedKbId" @click="openUploadModal">上传文档</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="ui.currentView !== 'docs'" class="kb-view-heading">
+        <div><span v-if="!embeddedMode || ui.currentView !== 'docs'">{{ ui.currentView === 'docs' ? '文档' : ui.currentView === 'rag' ? 'RAG 2.0' : '切片' }}</span><h2>{{ ui.currentView === 'docs' ? '文档列表' : ui.currentView === 'rag' ? '检索与索引' : (selectedDoc?.filename || '文档切片') }}</h2></div>
+        <button v-if="ui.currentView === 'docs' && !embeddedMode" class="btn primary" :disabled="!selectedKbId" @click="openUploadModal">上传文档</button>
       </div>
 
       <RagIndexWorkbench
@@ -3126,7 +3352,11 @@ function addUploadFiles(files) {
       />
 
       <template v-else-if="ui.currentView === 'docs'">
-        <div class="panel-header panel-header-tight">
+        <div class="doc-command-bar">
+          <div class="doc-command-title">
+            <span>文档</span>
+            <h2>文档列表</h2>
+          </div>
           <div class="stack-row doc-filter-row">
             <input class="doc-filter-search" v-model="docSearch" placeholder="搜索文档" />
             <select class="doc-filter-sort" v-model="docStatusFilter" title="状态筛选">
@@ -3154,27 +3384,26 @@ function addUploadFiles(files) {
               <option value="updated_asc">⏱ 更新时间 ↑</option>
               <option value="status">◎ 状态</option>
             </select>
-            <div class="stack-row doc-filter-actions">
-              <button class="btn btn-danger" @click="openDocDeleteCommitModal" :disabled="pendingDocDeleteCount === 0">
-              提交修改（{{ pendingDocDeleteCount }}）
-              </button>
-            </div>
           </div>
-        </div>
-        <div class="panel-header panel-header-tight">
-          <div class="stack-row batch-toolbar-row">
-            <label class="batch-check-all">
+          <div class="doc-command-actions">
+            <label class="batch-check-all" title="全选当前筛选结果">
               <input type="checkbox" :checked="allVisibleDocsChecked" @change="toggleSelectAllVisibleDocs" />
-              <span>全选当前列表</span>
+              <span>全选</span>
             </label>
-            <span class="batch-selected-text">已选 {{ selectedDocCount }} 项</span>
-            <button class="btn ghost" :disabled="selectedDocCount === 0" @click="clearSelectedDocs">清空选择</button>
-            <button class="btn primary" :disabled="!canRunBatchAction" @click="openBatchActionModal">批量操作</button>
+            <span v-if="selectedDocCount > 0" class="batch-selected-text">{{ selectedDocCount }} 项</span>
+            <button v-if="selectedDocCount > 0" class="btn ghost doc-clear-selection" @click="clearSelectedDocs">清除</button>
+            <button class="btn ghost" :disabled="!canRunBatchAction" @click="openBatchActionModal">
+              批量<span v-if="selectedDocCount > 0">（{{ selectedDocCount }}）</span>
+            </button>
+            <button v-if="pendingDocDeleteCount > 0" class="btn btn-danger" @click="openDocDeleteCommitModal">
+              提交删除（{{ pendingDocDeleteCount }}）
+            </button>
+            <button v-if="!embeddedMode" class="btn primary" :disabled="!selectedKbId" @click="openUploadModal">上传</button>
           </div>
         </div>
 
-        <div class="list">
-          <div v-if="!visibleDocs.length" class="list-item">
+        <div class="list doc-list-grid">
+          <div v-if="!visibleDocs.length" class="list-item doc-list-empty">
             <div class="empty-state-icon">⌁</div>
             <strong>还没有文档</strong>
             <span class="meta">上传资料后，可在这里管理切片、嵌入和摘要。</span>
@@ -3267,6 +3496,7 @@ function addUploadFiles(files) {
                 <option value="sentence">按句子切片</option>
                 <option value="paragraph">按段落切片</option>
                 <option value="markdown">按 Markdown 结构切片</option>
+                <option value="page">按页切片</option>
                 <option value="delimiter">按分隔符切片</option>
               </select>
               <button
@@ -3327,7 +3557,7 @@ function addUploadFiles(files) {
                 <span class="k">方式</span>
                 <span class="v">{{ chunkMethodLabel(selectedDoc ? getDocChunkMethod(selectedDoc) : chunkRunConfig.chunk_method) }}</span>
               </span>
-              <template v-if="!isDelimiterMethod(selectedDoc ? getDocChunkMethod(selectedDoc) : chunkRunConfig.chunk_method)">
+              <template v-if="usesChunkWindow(selectedDoc ? getDocChunkMethod(selectedDoc) : chunkRunConfig.chunk_method)">
                 <span class="chunk-param-chip">
                   <span class="k">长度</span>
                   <span class="v">{{ chunkRunConfig.chunk_size }}</span>
@@ -3358,6 +3588,7 @@ function addUploadFiles(files) {
                   <option value="sentence">句子</option>
                   <option value="paragraph">段落</option>
                   <option value="markdown">Markdown 结构</option>
+                  <option value="page">按页</option>
                   <option value="delimiter">分隔符</option>
                 </select>
               </label>
@@ -3374,7 +3605,7 @@ function addUploadFiles(files) {
                   step="1"
                   class="chunk-number"
                   placeholder="500"
-                  :disabled="isDelimiterMethod(chunkRunConfig.chunk_method)"
+                  :disabled="!usesChunkWindow(chunkRunConfig.chunk_method)"
                 />
               </label>
               <label
@@ -3390,7 +3621,7 @@ function addUploadFiles(files) {
                   step="1"
                   class="chunk-number"
                   placeholder="50"
-                  :disabled="isDelimiterMethod(chunkRunConfig.chunk_method)"
+                  :disabled="!usesChunkWindow(chunkRunConfig.chunk_method)"
                 />
               </label>
               <input
@@ -3400,6 +3631,7 @@ function addUploadFiles(files) {
                 placeholder="输入分隔符，例如 \n\n"
               />
               <button class="btn ghost" @click="chunkDocument(selectedDocId, selectedKbId)">重新切片</button>
+              <button class="btn ghost" @click="openChunkReplaceModal">批量替换</button>
               <button class="btn primary" @click="openCommitConfirm" :disabled="loading.commit">提交修改</button>
             </div>
             <div class="chunk-search-inline">
@@ -3459,13 +3691,19 @@ function addUploadFiles(files) {
       </template>
     </section>
 
-    <button v-if="!integratedMode" class="task-fab" :class="{ active: ui.showTaskDrawer }" @click="ui.showTaskDrawer = !ui.showTaskDrawer">
+    <button
+      class="task-fab"
+      :class="{ active: ui.showTaskDrawer }"
+      :title="ui.showTaskDrawer ? '收起任务监视器' : '打开任务监视器'"
+      :aria-label="ui.showTaskDrawer ? '收起任务监视器' : '打开任务监视器'"
+      @click="ui.showTaskDrawer = !ui.showTaskDrawer"
+    >
       <span v-if="runningTaskCount > 0" class="fab-spinner"></span>
       <span v-else class="fab-dot"></span>
       <span class="fab-count">{{ displayTasks.length }}</span>
     </button>
 
-    <aside v-if="!integratedMode && ui.showTaskDrawer" class="task-drawer">
+    <aside v-if="ui.showTaskDrawer" class="task-drawer">
       <div class="task-drawer-head">
         <strong>处理任务</strong>
         <div class="stack-row">
@@ -3593,6 +3831,7 @@ function addUploadFiles(files) {
               <option value="sentence">句子（默认）</option>
               <option value="paragraph">段落</option>
               <option value="markdown">Markdown 结构</option>
+              <option value="page">按页</option>
               <option value="delimiter">分隔符</option>
             </select>
           </label>
@@ -3604,7 +3843,7 @@ function addUploadFiles(files) {
               min="32"
               max="4000"
               step="1"
-              :disabled="!uploadWillChunk || isDelimiterMethod(uploadChunkConfig.chunk_method)"
+              :disabled="!uploadWillChunk || !usesChunkWindow(uploadChunkConfig.chunk_method)"
             />
           </label>
           <label class="field field-tight upload-field upload-field-number">
@@ -3615,7 +3854,7 @@ function addUploadFiles(files) {
               min="0"
               max="1000"
               step="1"
-              :disabled="!uploadWillChunk || isDelimiterMethod(uploadChunkConfig.chunk_method)"
+              :disabled="!uploadWillChunk || !usesChunkWindow(uploadChunkConfig.chunk_method)"
             />
           </label>
         </div>
@@ -3705,6 +3944,7 @@ function addUploadFiles(files) {
                 <option value="sentence">句子（默认）</option>
                 <option value="paragraph">段落</option>
                 <option value="markdown">Markdown 结构</option>
+                <option value="page">按页</option>
                 <option value="delimiter">分隔符</option>
               </select>
             </label>
@@ -3716,7 +3956,7 @@ function addUploadFiles(files) {
                 min="32"
                 max="4000"
                 step="1"
-                :disabled="isDelimiterMethod(batchActionForm.chunk_method)"
+                :disabled="!usesChunkWindow(batchActionForm.chunk_method)"
               />
             </label>
             <label class="field field-tight">
@@ -3727,7 +3967,7 @@ function addUploadFiles(files) {
                 min="0"
                 max="1000"
                 step="1"
-                :disabled="isDelimiterMethod(batchActionForm.chunk_method)"
+                :disabled="!usesChunkWindow(batchActionForm.chunk_method)"
               />
             </label>
             <label v-if="isDelimiterMethod(batchActionForm.chunk_method)" class="field field-tight">
@@ -3881,6 +4121,62 @@ function addUploadFiles(files) {
         </div>
         <div class="stack-row actions-right">
           <button class="btn ghost" @click="closeKbAccessModal">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="ui.showChunkReplaceModal" class="modal">
+      <div class="modal-card chunk-replace-modal" @keydown.enter.prevent="previewChunkReplacement">
+        <div class="panel-header">
+          <div>
+            <strong>批量替换切片文本</strong>
+            <p class="meta">扫描当前文档的全部切片，确认后统一加入待编辑，提交修改后才会重新嵌入并生效。</p>
+          </div>
+        </div>
+        <label class="field">
+          <span>查找文本</span>
+          <textarea v-model="chunkReplaceForm.search_text" rows="3" placeholder="输入需要替换的原文本"></textarea>
+        </label>
+        <label class="field">
+          <span>替换为</span>
+          <textarea v-model="chunkReplaceForm.replacement_text" rows="3" placeholder="留空表示删除匹配文本"></textarea>
+        </label>
+        <label class="chunk-search-toggle replace-case-toggle">
+          <input v-model="chunkReplaceForm.case_sensitive" type="checkbox" />
+          区分大小写
+        </label>
+        <div v-if="chunkReplaceForm.preview" class="chunk-replace-result">
+          <div class="chunk-replace-stats">
+            <span><strong>{{ chunkReplaceForm.preview.matched_chunks || 0 }}</strong> 个切片命中</span>
+            <span><strong>{{ chunkReplaceForm.preview.match_count || 0 }}</strong> 处匹配</span>
+            <span v-if="chunkReplaceForm.preview.skipped_frozen"><strong>{{ chunkReplaceForm.preview.skipped_frozen }}</strong> 个冻结切片跳过</span>
+            <span v-if="chunkReplaceForm.preview.skipped_delete"><strong>{{ chunkReplaceForm.preview.skipped_delete }}</strong> 个预删除切片跳过</span>
+            <span v-if="chunkReplaceForm.preview.skipped_empty"><strong>{{ chunkReplaceForm.preview.skipped_empty }}</strong> 个空结果跳过</span>
+          </div>
+          <div v-if="chunkReplaceForm.preview.previews?.length" class="chunk-replace-preview-list">
+            <article v-for="item in chunkReplaceForm.preview.previews.slice(0, 8)" :key="item.chunk_id">
+              <strong>切片 #{{ Number(item.chunk_index || 0) + 1 }} · {{ item.occurrences }} 处</strong>
+              <div class="replace-preview-pair">
+                <pre>{{ item.before }}</pre>
+                <span>→</span>
+                <pre>{{ item.after }}</pre>
+              </div>
+            </article>
+          </div>
+          <p v-else class="meta">没有找到匹配文本。</p>
+        </div>
+        <div class="stack-row actions-right">
+          <button class="btn ghost" @click="previewChunkReplacement" :disabled="loading.replacePreview || loading.replaceApply">
+            {{ loading.replacePreview ? '检查中…' : '预览匹配' }}
+          </button>
+          <button
+            class="btn primary"
+            @click="applyChunkReplacement"
+            :disabled="loading.replacePreview || loading.replaceApply || !chunkReplaceForm.preview?.matched_chunks"
+          >
+            {{ loading.replaceApply ? '处理中…' : '加入待编辑' }}
+          </button>
+          <button class="btn ghost" @click="closeChunkReplaceModal" :disabled="loading.replacePreview || loading.replaceApply">取消</button>
         </div>
       </div>
     </div>

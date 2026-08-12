@@ -2033,7 +2033,7 @@ export const endpointGroups = [
       endpoint('cp-document-multipart-upload', 'Control multipart upload command', 'POST', 'controlPlaneBaseUrl', '/api/v1/admin/kbs/{kbId}/documents/upload', { pathParams: { kbId: 'replace-kb-id' }, body: { note: 'multipart/form-data: repeat file parts; optional process_mode/chunk settings/auto_summary' } }),
       endpoint('cp-kb-summarize', 'Control knowledge-base summary command', 'POST', 'controlPlaneBaseUrl', '/api/v1/admin/kbs/{kbId}/summarize', { pathParams: { kbId: 'replace-kb-id' }, body: {} }),
       endpoint('cp-document-summarize', 'Control document summary command', 'POST', 'controlPlaneBaseUrl', '/api/v1/admin/kbs/{kbId}/documents/{docId}/summarize', { pathParams: { kbId: 'replace-kb-id', docId: 'replace-doc-id' }, body: {} }),
-      endpoint('cp-document-chunk', 'Control document rechunk command', 'POST', 'controlPlaneBaseUrl', '/api/v1/admin/kbs/{kbId}/documents/{docId}/chunk', { pathParams: { kbId: 'replace-kb-id', docId: 'replace-doc-id' }, body: { chunk_method: 'sentence', chunk_size: 500, chunk_overlap: 50 } }),
+      endpoint('cp-document-chunk', 'Control document rechunk command', 'POST', 'controlPlaneBaseUrl', '/api/v1/admin/kbs/{kbId}/documents/{docId}/chunk', { pathParams: { kbId: 'replace-kb-id', docId: 'replace-doc-id' }, body: { chunk_method: 'page', chunk_size: 500, chunk_overlap: 50 } }),
       endpoint('cp-document-reindex', 'Control document reindex command', 'POST', 'controlPlaneBaseUrl', '/api/v1/admin/kbs/{kbId}/documents/{docId}/reindex', { pathParams: { kbId: 'replace-kb-id', docId: 'replace-doc-id' }, body: { chunk_method: 'sentence', chunk_size: 500, chunk_overlap: 50 } }),
       endpoint('cp-document-chunk-commit', 'Control chunk-draft commit command', 'POST', 'controlPlaneBaseUrl', '/api/v1/admin/kbs/{kbId}/documents/{docId}/chunks/commit', { pathParams: { kbId: 'replace-kb-id', docId: 'replace-doc-id' }, body: {} }),
       endpoint('cp-document-freeze', 'Control document freeze metadata', 'PATCH', 'controlPlaneBaseUrl', '/api/v1/admin/kbs/{kbId}/documents/{docId}/freeze', { pathParams: { kbId: 'replace-kb-id', docId: 'replace-doc-id' }, body: { frozen: true } }),
@@ -2124,5 +2124,4 @@ export const endpointGroups = [
     ],
   },
 ]
-
 

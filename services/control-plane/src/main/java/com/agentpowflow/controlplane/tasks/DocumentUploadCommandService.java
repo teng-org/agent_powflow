@@ -19,7 +19,7 @@ public class DocumentUploadCommandService {
             "UPLOAD_ONLY", "UPLOAD_AND_CLEAN", "UPLOAD_CLEAN_CHUNK_EMBED"
     );
     private static final Set<String> CHUNK_METHODS = Set.of(
-            "fixed", "sentence", "paragraph", "markdown", "delimiter"
+            "fixed", "sentence", "paragraph", "markdown", "delimiter", "page"
     );
     private final DocumentUploadIntentService intentService;
     private final KnowledgeExecutionClient executionClient;

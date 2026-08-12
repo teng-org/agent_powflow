@@ -4183,6 +4183,16 @@ class KnowledgeBaseStore:
             )
             return [dict(row) for row in cur.fetchall()]
 
+    def list_all_document_chunks(self, tenant_id: str, kb_id: str, doc_id: str) -> list[dict]:
+        self._ensure_indexes()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT tenant_id,kb_id,doc_id,chunk_id,chunk_index,text,embedding_json,metadata,updated_at,created_at,frozen
+                FROM chunks WHERE tenant_id=%s AND kb_id=%s AND doc_id=%s ORDER BY chunk_index ASC""",
+                (tenant_id, kb_id, doc_id),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
     def build_document_text(self, tenant_id: str, kb_id: str, doc_id: str) -> str:
         self._ensure_indexes()
         with self._conn() as conn, conn.cursor() as cur:
@@ -5264,9 +5274,101 @@ class KnowledgeBaseStore:
             )
             return [dict(row) for row in cur.fetchall()]
 
+    def replace_text_in_chunk_drafts(
+        self,
+        tenant_id: str,
+        kb_id: str,
+        doc_id: str,
+        search_text: str,
+        replacement_text: str,
+        *,
+        case_sensitive: bool = True,
+        apply: bool = False,
+    ) -> dict:
+        """Preview or stage a literal text replacement across every chunk in a document.
+
+        Existing edit drafts are used as the source so a bulk replacement never
+        discards pending manual edits. Frozen chunks and chunks already marked for
+        deletion are intentionally left untouched.
+        """
+        self._ensure_indexes()
+        needle = self._strip_nul(str(search_text or ""))
+        replacement = self._strip_nul(str(replacement_text or ""))
+        if not needle:
+            raise ValueError("search_text must not be empty")
+
+        pattern = re.compile(re.escape(needle), 0 if case_sensitive else re.IGNORECASE)
+        matched_chunks = 0
+        match_count = 0
+        staged_chunks = 0
+        skipped_frozen = 0
+        skipped_delete = 0
+        skipped_empty = 0
+        previews: list[dict] = []
+
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT c.chunk_id,c.chunk_index,c.text,c.frozen,d.action AS draft_action,d.text AS draft_text
+                FROM chunks c
+                LEFT JOIN chunk_drafts d
+                  ON d.tenant_id=c.tenant_id AND d.kb_id=c.kb_id
+                 AND d.doc_id=c.doc_id AND d.chunk_id=c.chunk_id
+                WHERE c.tenant_id=%s AND c.kb_id=%s AND c.doc_id=%s
+                ORDER BY c.chunk_index ASC
+                FOR UPDATE OF c""",
+                (tenant_id, kb_id, doc_id),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+            for row in rows:
+                if bool(row.get("frozen")):
+                    skipped_frozen += 1
+                    continue
+                if row.get("draft_action") == "delete":
+                    skipped_delete += 1
+                    continue
+                source = str(row.get("draft_text") if row.get("draft_action") == "edit" else row.get("text") or "")
+                updated, occurrences = pattern.subn(lambda _: replacement, source)
+                if occurrences <= 0:
+                    continue
+                matched_chunks += 1
+                match_count += occurrences
+                if not updated.strip():
+                    skipped_empty += 1
+                    continue
+                if len(previews) < 50:
+                    previews.append({
+                        "chunk_id": str(row.get("chunk_id") or ""),
+                        "chunk_index": int(row.get("chunk_index") or 0),
+                        "occurrences": occurrences,
+                        "before": source[:240],
+                        "after": updated[:240],
+                    })
+                if apply:
+                    cur.execute(
+                        """INSERT INTO chunk_drafts (tenant_id,kb_id,doc_id,chunk_id,action,text,created_at,updated_at)
+                        VALUES (%s,%s,%s,%s,'edit',%s,NOW(),NOW())
+                        ON CONFLICT (tenant_id,kb_id,doc_id,chunk_id) DO UPDATE SET
+                            action='edit',text=EXCLUDED.text,updated_at=NOW()""",
+                        (tenant_id, kb_id, doc_id, row["chunk_id"], updated),
+                    )
+                    staged_chunks += 1
+
+        return {
+            "doc_id": doc_id,
+            "total_chunks": len(rows),
+            "matched_chunks": matched_chunks,
+            "match_count": match_count,
+            "staged_chunks": staged_chunks,
+            "skipped_frozen": skipped_frozen,
+            "skipped_delete": skipped_delete,
+            "skipped_empty": skipped_empty,
+            "applied": bool(apply),
+            "previews": previews,
+        }
+
     def commit_chunk_drafts(self, tenant_id: str, kb_id: str, doc_id: str, embed_fn) -> dict:
         self._ensure_indexes()
-        chunks = self.list_chunks(tenant_id, kb_id, doc_id, limit=10000)
+        chunks = self.list_all_document_chunks(tenant_id, kb_id, doc_id)
         drafts = {item["chunk_id"]: item for item in self.list_chunk_drafts(tenant_id, kb_id, doc_id)}
         if not drafts:
             return {"doc_id": doc_id, "total_chunks": len(chunks), "reembedded_chunks": 0, "deleted_chunks": 0}
