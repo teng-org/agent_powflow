@@ -48,6 +48,7 @@ from runtime.workflow_secrets import (
     WorkflowSecretNotFound,
     workflow_secret_store,
 )
+from runtime.javascript_tools import JavaScriptToolError, execute_javascript_tool
 from workers.app.celery_app import celery_app
 
 try:
@@ -205,6 +206,20 @@ class ApiControlRunDispatchRequest(BaseModel):
     workflow_layout: dict
     input_payload: dict
     approval_resume: dict | None = None
+
+
+class ApiInternalSecretResolveRequest(BaseModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    secret_ref: str = Field(min_length=1, max_length=256)
+
+
+class ApiJavaScriptToolExecuteRequest(BaseModel):
+    tenant_id: str = Field(min_length=1, max_length=64)
+    actor_id: str = Field(min_length=1, max_length=128)
+    tool_id: str = Field(min_length=1, max_length=64)
+    tool_version: int = Field(ge=0)
+    definition: Dict
+    arguments: Dict = Field(default_factory=dict)
 
 
 class ApiInternalTaskRevokeRequest(BaseModel):
@@ -6625,6 +6640,31 @@ async def dispatch_control_run(body: ApiControlRunDispatchRequest, request: Requ
         ignore_result=True,
     )
     return {"status": "accepted", "run_id": body.run_id, "task_id": task_id}
+
+
+@app.post("/api/v1/internal/workflow-secrets/resolve")
+async def resolve_workflow_secret_internal(body: ApiInternalSecretResolveRequest, request: Request) -> Dict:
+    require_internal_token(request)
+    try:
+        resolved = workflow_secret_store.resolve(body.tenant_id, body.secret_ref)
+    except WorkflowSecretNotFound as exc:
+        raise HTTPException(status_code=404, detail="secret reference is unavailable") from exc
+    except SecretVaultUnavailable as exc:
+        raise HTTPException(status_code=503, detail="secret vault is unavailable") from exc
+    return {
+        "status": "ok", "value": resolved.value, "secret_id": resolved.secret_id,
+        "fingerprint": resolved.fingerprint, "version": resolved.version,
+    }
+
+
+@app.post("/api/v1/internal/javascript-tools/execute")
+async def execute_javascript_tool_internal(body: ApiJavaScriptToolExecuteRequest, request: Request) -> Dict:
+    require_internal_token(request)
+    try:
+        result = await asyncio.to_thread(execute_javascript_tool, body.definition, body.arguments)
+    except JavaScriptToolError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": "ok", "tool_id": body.tool_id, "tool_version": body.tool_version, **result}
 
 
 @app.post("/api/v1/agent/run")

@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import AgentWorkbench from './AgentWorkbench.vue'
 import AgentCanvaWorkbench from './AgentCanvaWorkbench.vue'
 import IntegrationManagementPage from './IntegrationManagementPage.vue'
+import ToolWorkbenchPage from './ToolWorkbenchPage.vue'
 
 const props = defineProps({
   page: { type: String, required: true },
@@ -25,6 +26,7 @@ const state = reactive({
   workflows: [],
   skills: [],
   mcpConnections: [],
+  javascriptTools: [],
   deployments: [],
   apiKeys: {},
   invocations: {},
@@ -67,6 +69,7 @@ const title = computed(() => ({
   workflows: 'Workflow',
   skills: 'Skill 管理',
   mcp: 'MCP 接入',
+  tools: '工具工作台',
   deployments: 'API 发布',
   members: '团队与权限',
 }[props.page] || '工作空间'))
@@ -78,6 +81,7 @@ const pageCopy = computed(() => ({
   workflows: '从可执行模板创建流程，发布后形成不可变版本供 Agent 或 API 使用。',
   skills: '把稳定的指令、输入输出契约和模型参数发布为可复用、可审计的能力版本。',
   mcp: '接入远程 MCP Server，管理工具目录和密钥引用，并在 Workflow 中安全调用。',
+  tools: '陈列、测试和发布 JavaScript 工具，并控制 AI 与 Workflow 的使用范围。',
   deployments: '把已发布资产绑定到稳定调用地址，并创建可轮换、可吊销的 API Key。',
   members: '查看工作空间成员；管理员通过一次性邀请令牌安全地添加成员和分配角色。',
 }[props.page] || ''))
@@ -119,6 +123,8 @@ function testerFor(item) {
       open: false,
       apiKey: '',
       input: JSON.stringify({ message: '你好，请介绍你的能力' }, null, 2),
+      stream: false,
+      conversationId: '',
       loading: false,
       result: null,
       statusUrl: '',
@@ -130,8 +136,14 @@ function testerFor(item) {
 function curlExample(item) {
   let input = {}
   try { input = JSON.parse(testerFor(item).input) } catch { input = { message: '请填写有效 JSON' } }
-  const body = JSON.stringify({ input }).replace(/'/g, "'\\''")
-  return `curl -X POST '${absoluteApiUrl(item.invoke_path)}' -H 'Authorization: Bearer $POWFLOW_API_KEY' -H 'Content-Type: application/json' -H 'X-Trace-Id: your-trace-id' -d '${body}'`
+  const tester = testerFor(item)
+  const openAi = item.asset_type === 'AGENT'
+  const path = openAi ? `/api/v1/deployments/${item.slug}/v1/chat/completions` : item.invoke_path
+  const payload = openAi
+    ? { model: item.slug, user: props.currentUserEmail || 'console-debugger', messages: [{ role: 'user', content: String(input.message || JSON.stringify(input)) }], stream: tester.stream, ...(tester.conversationId ? { conversation_id: tester.conversationId } : {}) }
+    : { input }
+  const body = JSON.stringify(payload).replace(/'/g, "'\\''")
+  return `curl ${tester.stream && openAi ? '-N ' : ''}-X POST '${absoluteApiUrl(path)}' -H 'Authorization: Bearer $POWFLOW_API_KEY' -H 'Content-Type: application/json' -H 'X-Trace-Id: your-trace-id' -d '${body}'`
 }
 
 async function request(path, options = {}) {
@@ -150,10 +162,13 @@ async function request(path, options = {}) {
     const uploadLimitMessage = response.status === 413 && data?.error_code === 'UPLOAD_LIMIT_EXCEEDED'
       ? String(data.message || '上传内容超过允许大小')
       : ''
+    const uploadFileMessage = response.status === 400 && data?.error_code === 'UPLOAD_FILE_REQUIRED'
+      ? String(data.message || '没有收到待上传文件，请重新选择文件')
+      : ''
     const assetConflictMessage = response.status === 409 && data?.error_code === 'ASSET_IN_USE'
       ? String(data.message || '该资产仍被其他资源使用')
       : ''
-    const safe = uploadLimitMessage || assetConflictMessage || (response.status === 401 ? '登录状态已失效' : response.status === 403 ? '你没有执行此操作的权限' : response.status === 404 ? '请求的内容不存在' : response.status === 409 ? '当前操作存在冲突，请刷新后重试' : response.status === 413 ? '上传内容超过允许大小' : response.status >= 500 ? '服务暂时不可用，请稍后再试' : '请求未能完成，请检查填写内容')
+    const safe = uploadLimitMessage || uploadFileMessage || assetConflictMessage || (response.status === 401 ? '登录状态已失效' : response.status === 403 ? '你没有执行此操作的权限' : response.status === 404 ? '请求的内容不存在' : response.status === 409 ? '当前操作存在冲突，请刷新后重试' : response.status === 413 ? '上传内容超过允许大小' : response.status >= 500 ? '服务暂时不可用，请稍后再试' : '请求未能完成，请检查填写内容')
     const error = new Error(safe)
     error.status = response.status
     error.data = data
@@ -187,6 +202,7 @@ async function loadAll() {
     request('/api/v1/workspace/members'),
     request('/api/v1/skills'),
     request('/api/v1/mcp-connections'),
+    request('/api/v1/javascript-tools'),
   ]
   if (canManageMembers.value) requests.push(request('/api/v1/workspace/invitations'))
   const results = await Promise.all(requests)
@@ -197,7 +213,8 @@ async function loadAll() {
   state.members = results[4]?.items || []
   state.skills = results[5]?.items || []
   state.mcpConnections = results[6]?.items || []
-  state.invitations = results[7]?.items || []
+  state.javascriptTools = results[7]?.items || []
+  state.invitations = results[8]?.items || []
   if (['home', 'knowledge'].includes(props.page)) await loadKnowledgeStats()
   if (props.page === 'deployments') {
     await loadDeploymentSummaries()
@@ -579,20 +596,67 @@ async function invokeDeployment(item) {
   try {
     let input
     try { input = JSON.parse(tester.input) } catch { throw new Error('input 必须是有效的 JSON') }
-    const response = await fetch(absoluteApiUrl(item.invoke_path), {
+    const isAgent = item.asset_type === 'AGENT'
+    const path = isAgent ? `/api/v1/deployments/${item.slug}/v1/chat/completions` : item.invoke_path
+    const payload = isAgent
+      ? {
+          model: item.slug,
+          user: props.currentUserEmail || 'console-debugger',
+          messages: [{ role: 'user', content: String(input.message || JSON.stringify(input)) }],
+          stream: tester.stream,
+          ...(tester.conversationId ? { conversation_id: tester.conversationId } : {}),
+        }
+      : { input }
+    const response = await fetch(absoluteApiUrl(path), {
       method: 'POST',
       headers: { Authorization: `Bearer ${tester.apiKey.trim()}`, 'Content-Type': 'application/json', 'X-Trace-Id': crypto.randomUUID() },
-      body: JSON.stringify({ input }),
+      body: JSON.stringify(payload),
     })
-    const data = await response.json().catch(() => ({}))
+    const data = tester.stream && isAgent && response.ok
+      ? await readOpenAiStream(response, tester)
+      : await response.json().catch(() => ({}))
     tester.result = { httpStatus: response.status, data }
     tester.statusUrl = data.status_url || ''
+    tester.conversationId = data?.powflow?.conversation_id || tester.conversationId
     if (!response.ok) throw new Error(response.status === 401 ? 'API Key 无效、已过期或已吊销' : response.status === 429 ? '已触发发布限流' : '调用失败，请检查发布状态和输入')
     emit('notify', { type: 'success', title: item.asset_type === 'WORKFLOW' ? '工作流已提交' : '调用已完成', message: data.trace_id ? `Trace ${data.trace_id}` : '' })
     await loadInvocations(item.deployment_id)
   } finally {
     tester.loading = false
   }
+}
+
+async function readOpenAiStream(response, tester) {
+  const reader = response.body?.getReader()
+  if (!reader) return {}
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  let extension = {}
+  while (true) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+    const frames = buffer.split('\n\n')
+    buffer = frames.pop() || ''
+    for (const frame of frames) {
+      const dataLine = frame.split('\n').find((line) => line.startsWith('data:'))
+      const raw = dataLine?.slice(5).trim()
+      if (!raw || raw === '[DONE]') continue
+      try {
+        const chunk = JSON.parse(raw)
+        content += chunk?.choices?.[0]?.delta?.content || ''
+        if (chunk.powflow) extension = { ...extension, ...chunk.powflow }
+        tester.result = {
+          httpStatus: response.status,
+          data: { object: 'chat.completion.stream', choices: [{ message: { role: 'assistant', content } }], powflow: extension },
+        }
+      } catch {
+        // Ignore comments and non-JSON SSE control frames.
+      }
+    }
+    if (done) break
+  }
+  return { object: 'chat.completion.stream', choices: [{ message: { role: 'assistant', content } }], powflow: extension }
 }
 
 async function queryDeploymentRun(item) {
@@ -663,6 +727,9 @@ onBeforeUnmount(() => window.removeEventListener('message', handleManagerMessage
       :token="token"
       :knowledge-bases="state.knowledgeBases"
       :workflows="state.workflows"
+      :skills="state.skills"
+      :mcp-connections="state.mcpConnections"
+      :javascript-tools="state.javascriptTools"
       @close="state.activeAgentId = ''"
       @saved="updateAgentInState"
       @published="handleAgentPublished"
@@ -677,6 +744,7 @@ onBeforeUnmount(() => window.removeEventListener('message', handleManagerMessage
       :knowledge-bases="state.knowledgeBases"
       :skills="state.skills"
       :mcp-connections="state.mcpConnections"
+      :javascript-tools="state.javascriptTools"
       @close="state.activeWorkflowId = ''"
       @saved="updateWorkflowInState"
       @published="handleWorkflowPublished"
@@ -696,6 +764,7 @@ onBeforeUnmount(() => window.removeEventListener('message', handleManagerMessage
       @changed="loadAll"
       @notify="(payload) => emit('notify', payload)"
     />
+    <ToolWorkbenchPage v-else-if="page === 'tools'" :base-url="baseUrl" :token="token" :items="state.javascriptTools" @changed="refresh" @notify="emit('notify',$event)" />
 
     <template v-else-if="page === 'home'">
       <section class="asset-stats">
@@ -789,14 +858,14 @@ onBeforeUnmount(() => window.removeEventListener('message', handleManagerMessage
       <section v-else class="deployment-workspace">
         <header class="deployment-workspace-header"><button class="workbench-back" type="button" @click="closeDeployment">←</button><div><span class="asset-eyebrow">API Deployment</span><h1>{{ activeDeployment.name }}</h1><p>{{ activeDeployment.asset_type === 'AGENT' ? '智能体同步调用' : '工作流异步调用' }} · 固定版本 v{{ activeDeployment.asset_version_no }}</p></div><div class="deployment-workspace-actions"><span :class="['deployment-status', activeDeployment.status.toLowerCase()]">{{ deploymentStatusText(activeDeployment.status) }}</span><button class="asset-button ghost small" :disabled="activeDeployment.status === 'ARCHIVED'" @click="run(() => pauseDeployment(activeDeployment), '发布状态已更新')">{{ activeDeployment.status === 'ACTIVE' ? '暂停服务' : '启用服务' }}</button><button class="asset-button ghost small" @click="run(() => openDeployment(activeDeployment), '')">刷新</button><button class="asset-link danger" :disabled="state.loading" @click="openAssetDelete('deployment', activeDeployment)">删除发布</button></div></header>
 
-        <section class="deployment-endpoint-hero"><div><span>公开调用地址</span><code>{{ absoluteApiUrl(activeDeployment.invoke_path) }}</code></div><button class="asset-button primary small" @click="copy(absoluteApiUrl(activeDeployment.invoke_path))">复制地址</button><button class="asset-button ghost small" @click="copy(curlExample(activeDeployment))">复制 cURL</button></section>
+        <section class="deployment-endpoint-hero"><div><span>{{ activeDeployment.asset_type === 'AGENT' ? 'OpenAI 兼容调用地址' : '公开调用地址' }}</span><code>{{ absoluteApiUrl(activeDeployment.asset_type === 'AGENT' ? `/api/v1/deployments/${activeDeployment.slug}/v1/chat/completions` : activeDeployment.invoke_path) }}</code></div><button class="asset-button primary small" @click="copy(absoluteApiUrl(activeDeployment.asset_type === 'AGENT' ? `/api/v1/deployments/${activeDeployment.slug}/v1/chat/completions` : activeDeployment.invoke_path))">复制地址</button><button class="asset-button ghost small" @click="copy(curlExample(activeDeployment))">复制 cURL</button></section>
 
         <section class="deployment-workspace-metrics"><article><span>每分钟上限</span><strong>{{ activeDeployment.rate_limit_per_minute }}</strong><small>请求</small></article><article><span>累计日志</span><strong>{{ deploymentLogs(activeDeployment).length }}</strong><small>最近 100 条</small></article><article><span>有效密钥</span><strong>{{ (state.apiKeys[activeDeployment.deployment_id] || []).filter((key) => key.status === 'ACTIVE').length }}</strong><small>可立即吊销</small></article><article><span>最近调用</span><strong>{{ deploymentLastCall(activeDeployment) ? invocationStatusText(deploymentLastCall(activeDeployment).status) : '暂无' }}</strong><small>{{ deploymentLastCall(activeDeployment) ? new Date(deploymentLastCall(activeDeployment).created_at).toLocaleTimeString() : '等待请求' }}</small></article></section>
 
         <section class="deployment-work-grid">
           <article class="deployment-work-panel key-work-panel"><header><div><span class="panel-kicker">访问控制</span><h2>API Key</h2><p>密钥由服务端安全生成，明文只显示一次，并自动填入在线调用。</p></div><button class="asset-button primary small" :disabled="state.loading" @click="run(() => autoCreateKey(activeDeployment), '')">自动生成 API Key</button></header><div class="key-create"><input v-model.trim="forms.key.name" maxlength="128" placeholder="自定义密钥名称" /><label><span>失效时间（可选）</span><input v-model="forms.key.expires_at" type="datetime-local" /></label><button class="asset-button ghost small" :disabled="!forms.key.name" @click="forms.key.deployment_id = activeDeployment.deployment_id; run(createKey, 'API Key 已创建，请立即保存')">按配置创建</button></div><div class="key-table"><div v-if="!(state.apiKeys[activeDeployment.deployment_id] || []).length" class="asset-meta">暂无密钥，可一键自动生成，或按名称与失效时间创建。</div><div v-for="key in state.apiKeys[activeDeployment.deployment_id] || []" :key="key.api_key_id" class="key-row"><code>{{ key.key_prefix }}••••</code><span>{{ key.name }} · {{ key.status === 'ACTIVE' ? '有效' : '已吊销' }}</span><span>{{ key.expires_at ? `失效于 ${new Date(key.expires_at).toLocaleString()}` : '长期有效' }}</span><span>{{ key.last_used_at ? `最近使用 ${new Date(key.last_used_at).toLocaleString()}` : '尚未使用' }}</span><button v-if="key.status === 'ACTIVE'" class="asset-link danger" @click="run(() => revokeKey(key), '密钥已吊销')">吊销</button></div></div></article>
 
-          <article class="deployment-work-panel tester-work-panel"><header class="tester-heading"><div><span class="panel-kicker">Request Lab</span><h2>在线调用</h2><p>直接使用 API Key 请求公开地址，不使用登录令牌。</p></div><button class="asset-link" @click="copy(curlExample(activeDeployment))">复制 cURL</button></header><div class="deployment-tester"><label>API Key<input v-model.trim="testerFor(activeDeployment).apiKey" type="password" autocomplete="off" placeholder="pf_live_…" /></label><label>input（JSON）<textarea v-model="testerFor(activeDeployment).input" rows="8" spellcheck="false"></textarea></label><div class="tester-actions"><button class="asset-button primary small" :disabled="testerFor(activeDeployment).loading || !testerFor(activeDeployment).apiKey" @click="run(() => invokeDeployment(activeDeployment), '')">{{ testerFor(activeDeployment).loading ? '调用中…' : '发送请求' }}</button><button v-if="testerFor(activeDeployment).statusUrl" class="asset-button ghost small" :disabled="testerFor(activeDeployment).loading" @click="run(() => queryDeploymentRun(activeDeployment), '')">查询工作流结果</button></div><pre v-if="testerFor(activeDeployment).result"><code>HTTP {{ testerFor(activeDeployment).result.httpStatus }}</code><code>{{ JSON.stringify(testerFor(activeDeployment).result.data, null, 2) }}</code></pre></div></article>
+          <article class="deployment-work-panel tester-work-panel"><header class="tester-heading"><div><span class="panel-kicker">Request Lab</span><h2>在线调用</h2><p>直接使用 API Key 请求公开地址；智能体采用 OpenAI 兼容协议，并可连续使用会话记忆。</p></div><button class="asset-link" @click="copy(curlExample(activeDeployment))">复制 cURL</button></header><div class="deployment-tester"><label>API Key<input v-model.trim="testerFor(activeDeployment).apiKey" type="password" autocomplete="off" placeholder="pf_live_…" /></label><label>input（JSON）<textarea v-model="testerFor(activeDeployment).input" rows="8" spellcheck="false"></textarea></label><label v-if="activeDeployment.asset_type === 'AGENT'" class="stream-toggle"><input v-model="testerFor(activeDeployment).stream" type="checkbox" /><span><strong>SSE 流式回复</strong><small>开启后实时接收 token；关闭时一次性返回。</small></span></label><label v-if="activeDeployment.asset_type === 'AGENT'">会话记忆 ID<input v-model.trim="testerFor(activeDeployment).conversationId" placeholder="首次留空，响应后自动保存" /></label><div class="tester-actions"><button class="asset-button primary small" :disabled="testerFor(activeDeployment).loading || !testerFor(activeDeployment).apiKey" @click="run(() => invokeDeployment(activeDeployment), '')">{{ testerFor(activeDeployment).loading ? '调用中…' : '发送请求' }}</button><button v-if="testerFor(activeDeployment).statusUrl" class="asset-button ghost small" :disabled="testerFor(activeDeployment).loading" @click="run(() => queryDeploymentRun(activeDeployment), '')">查询工作流结果</button></div><dl v-if="testerFor(activeDeployment).result?.data?.powflow?.memory" class="memory-observability"><div><dt>近期消息</dt><dd>{{ testerFor(activeDeployment).result.data.powflow.memory.recent_messages }}</dd></div><div><dt>摘要</dt><dd>{{ testerFor(activeDeployment).result.data.powflow.memory.summary_chars }} 字</dd></div><div><dt>长期记忆</dt><dd>{{ testerFor(activeDeployment).result.data.powflow.memory.episodic_items }}</dd></div><div><dt>历史召回</dt><dd>{{ testerFor(activeDeployment).result.data.powflow.memory.session_recall_items }}</dd></div><div><dt>注入上下文</dt><dd>{{ testerFor(activeDeployment).result.data.powflow.memory.injected_context_chars }} 字</dd></div></dl><pre v-if="testerFor(activeDeployment).result"><code>HTTP {{ testerFor(activeDeployment).result.httpStatus }}</code><code>{{ JSON.stringify(testerFor(activeDeployment).result.data, null, 2) }}</code></pre></div></article>
 
           <article class="deployment-work-panel invocation-work-panel"><header><div><span class="panel-kicker">Observability</span><h2>调用日志</h2><p>按 Trace 追踪最近请求、耗时和输出规模。</p></div><button class="asset-link" @click="run(() => loadInvocations(activeDeployment.deployment_id), '')">刷新日志</button></header><div class="invocation-panel"><div v-if="!deploymentLogs(activeDeployment).length" class="asset-meta">暂无调用日志</div><div v-for="log in deploymentLogs(activeDeployment)" :key="log.invocation_id" class="invocation-row"><span :class="['deployment-status', ['COMPLETED', 'ACCEPTED'].includes(log.status) ? 'active' : 'paused']">{{ invocationStatusText(log.status) }}</span><code :title="log.trace_id">{{ log.trace_id }}</code><span>{{ log.duration_ms ?? '-' }} ms</span><span>{{ log.output_bytes }} B</span><span>{{ new Date(log.created_at).toLocaleString() }}</span></div></div></article>
         </section>
@@ -853,6 +922,7 @@ onBeforeUnmount(() => window.removeEventListener('message', handleManagerMessage
 .agent-library-toolbar{display:flex;align-items:center;justify-content:space-between;max-width:1240px;margin:0 auto 18px}.agent-library-toolbar>div{display:grid;gap:5px}.agent-library-toolbar strong{font-size:15px}.agent-library-toolbar span{color:var(--workspace-muted,#6e6e73);font-size:12px}.agent-library-grid{align-items:stretch}.agent-create-card{display:grid;align-content:center;gap:13px;min-height:262px;padding:22px;border:1px dashed rgba(0,113,227,.38);border-radius:22px;background:linear-gradient(145deg,rgba(0,113,227,.07),rgba(103,93,246,.035))}.agent-create-mark{display:grid;place-items:center;width:44px;height:44px;border-radius:15px;color:white;background:linear-gradient(145deg,#168bff,#675df6);box-shadow:0 12px 30px rgba(44,113,238,.22);font-size:23px}.agent-create-card h3{margin:0 0 5px}.agent-create-card p{margin:0;color:var(--workspace-muted,#6e6e73);font-size:12px;line-height:1.5}.agent-create-card .asset-button{justify-self:start}.agent-product-card{min-height:262px;cursor:pointer;transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease}.agent-product-card:hover{transform:translateY(-3px);border-color:rgba(0,113,227,.26);box-shadow:0 20px 48px rgba(0,0,0,.12)}.agent-product-card:active{transform:scale(.99)}.agent-dynamic-avatar{display:grid;place-items:center;width:46px;height:46px;border-radius:15px;color:#fff;background:radial-gradient(circle at 30% 20%,hsla(var(--kb-hue-two),90%,72%,.9),transparent 44%),linear-gradient(145deg,hsl(var(--kb-hue),72%,48%),hsl(var(--kb-hue-two),70%,38%));box-shadow:0 10px 25px hsla(var(--kb-hue),70%,35%,.2)}.agent-capabilities{display:flex;gap:6px;margin-top:15px;flex-wrap:wrap}.agent-capabilities span{padding:5px 8px;border-radius:9px;color:var(--workspace-muted,#6e6e73);background:rgba(127,127,127,.08);font-size:10px}
 .agent-form,.deployment-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.form-heading{grid-column:1/-1}.agent-form label,.deployment-form label{display:grid;gap:7px;color:var(--workspace-muted,#6e6e73);font-size:12px}.agent-form button,.deployment-form button{justify-self:start}.deployment-list{display:grid;gap:16px;max-width:1240px;margin:0 auto}.deployment-card{margin:0}.deployment-status{padding:6px 10px;border-radius:999px;font-size:11px;font-weight:800}.deployment-status.active{background:#e8f8ef;color:#18794e}.deployment-status.paused,.deployment-status.archived{background:#fff4df;color:#8a5600}.endpoint-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:16px 0;padding:12px 14px;border-radius:14px;background:rgba(118,118,128,.08)}.endpoint-row code{overflow:auto}.deployment-actions{justify-content:flex-start;flex-wrap:wrap;color:var(--workspace-muted,#6e6e73)}.key-panel{margin-top:18px;padding-top:18px;border-top:1px solid rgba(0,0,0,.08)}.key-create{display:grid;grid-template-columns:minmax(180px,1fr) minmax(210px,1fr) auto;align-items:end;gap:10px;margin-bottom:10px}.key-create label{display:grid;gap:5px;color:var(--workspace-muted,#6e6e73);font-size:10px}.key-row{display:grid;grid-template-columns:minmax(150px,auto) minmax(130px,1fr) minmax(160px,1fr) minmax(160px,1fr) auto;padding:10px 0;border-top:1px solid rgba(0,0,0,.06);font-size:11px}.secret-reveal{position:sticky;bottom:18px;display:grid;grid-template-columns:1fr minmax(240px,auto) auto auto;align-items:center;gap:16px;background:#1d1d1f;color:white;box-shadow:0 18px 50px rgba(0,0,0,.28)}.secret-reveal p{margin:4px 0 0;color:#aaa}.secret-reveal code{overflow:auto}
 .deployment-tester{display:grid;grid-template-columns:minmax(220px,.75fr) minmax(320px,1.25fr);gap:14px;margin-top:18px;padding:18px;border:1px solid rgba(127,127,127,.16);border-radius:18px;background:rgba(127,127,127,.055)}.tester-heading{grid-column:1/-1;display:flex;align-items:flex-start;justify-content:space-between;gap:18px}.tester-heading p{margin-top:4px;font-size:11px}.deployment-tester label{display:grid;align-content:start;gap:7px;color:var(--workspace-muted,#6e6e73);font-size:11px}.deployment-tester textarea{font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace}.tester-actions{display:flex;align-items:center;gap:10px}.deployment-tester pre{grid-column:1/-1;display:grid;gap:8px;max-height:320px;margin:0;padding:15px;overflow:auto;border-radius:14px;color:#d7e8ff;background:#111318;font:11px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.invocation-panel{display:grid;margin-top:18px;padding-top:12px;border-top:1px solid rgba(0,0,0,.08)}.invocation-row{display:grid;grid-template-columns:90px minmax(120px,1fr) 80px 70px minmax(150px,auto);align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid rgba(0,0,0,.06);font-size:12px}.invocation-row code{overflow:hidden;text-overflow:ellipsis}
+.deployment-tester .stream-toggle{display:flex;align-items:center;gap:10px;padding:11px 12px;border:1px solid rgba(41,145,255,.18);border-radius:14px;background:rgba(41,145,255,.06)}.stream-toggle input{width:18px!important;height:18px;margin:0;accent-color:#0071e3}.stream-toggle span{display:grid;gap:2px}.stream-toggle strong{color:var(--workspace-text);font-size:11px}.stream-toggle small{font-size:9px}.memory-observability{grid-column:1/-1;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;margin:0}.memory-observability div{display:grid;gap:4px;padding:10px;border-radius:12px;background:rgba(41,145,255,.075)}.memory-observability dt{color:var(--workspace-muted);font-size:9px}.memory-observability dd{margin:0;color:var(--workspace-text);font-size:12px;font-weight:720}
 .deployment-library-toolbar{display:flex;align-items:center;justify-content:space-between;gap:18px;max-width:1240px;margin:0 auto 18px}.deployment-library-toolbar>div{display:grid;gap:5px}.deployment-library-toolbar strong{font-size:15px}.deployment-library-toolbar span{color:var(--workspace-muted,#6e6e73);font-size:12px}.deployment-library-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;max-width:1240px;margin:0 auto}.deployment-create-card,.deployment-product-card{min-height:300px;border-radius:24px}.deployment-create-card{display:grid;place-items:center;align-content:center;gap:8px;padding:24px;border:1px dashed rgba(0,113,227,.38);color:var(--workspace-muted,#6e6e73);background:linear-gradient(145deg,rgba(0,113,227,.07),rgba(103,93,246,.025));transition:transform .18s ease,border-color .18s ease,background .18s ease}.deployment-create-card:hover{transform:translateY(-3px);border-color:rgba(0,113,227,.72);background:linear-gradient(145deg,rgba(0,113,227,.12),rgba(103,93,246,.05))}.deployment-create-card>span{display:grid;place-items:center;width:48px;height:48px;margin-bottom:8px;border-radius:16px;color:#fff;background:linear-gradient(145deg,#168bff,#675df6);box-shadow:0 14px 30px rgba(44,113,238,.24);font-size:26px}.deployment-create-card strong{color:var(--workspace-text);font-size:15px}.deployment-create-card small{font-size:11px}.deployment-product-card{display:flex;min-width:0;flex-direction:column;padding:22px;border:1px solid rgba(0,0,0,.07);background:rgba(255,255,255,.82);box-shadow:0 12px 36px rgba(0,0,0,.06);cursor:pointer;backdrop-filter:blur(24px) saturate(160%);transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease}.deployment-product-card:hover{transform:translateY(-3px);border-color:rgba(0,113,227,.3);box-shadow:0 20px 48px rgba(0,0,0,.12)}.deployment-product-card:focus-visible{outline:3px solid rgba(0,113,227,.28);outline-offset:3px}.deployment-product-card>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.deployment-avatar{display:grid;place-items:center;width:46px;height:46px;border-radius:15px;color:#fff;font-size:17px;box-shadow:0 11px 28px rgba(0,0,0,.16)}.deployment-avatar.agent{background:linear-gradient(145deg,#168bff,#675df6)}.deployment-avatar.workflow{background:linear-gradient(145deg,#7457df,#d04fa3)}.deployment-card-title{display:grid;gap:6px;margin-top:22px}.deployment-card-title>span{color:var(--workspace-muted,#6e6e73);font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}.deployment-card-title h3{margin:0;font-size:21px;letter-spacing:-.025em}.deployment-card-title code{overflow:hidden;color:var(--workspace-muted,#6e6e73);font-size:10px;text-overflow:ellipsis;white-space:nowrap}.deployment-card-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:18px 0 0}.deployment-card-metrics div{display:grid;gap:4px;padding:10px;border-radius:12px;background:rgba(127,127,127,.065)}.deployment-card-metrics dt{color:var(--workspace-muted,#6e6e73);font-size:9px}.deployment-card-metrics dd{margin:0;font-size:13px;font-weight:720;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.deployment-product-card footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:auto;padding-top:20px;color:var(--workspace-muted,#6e6e73);font-size:10px}.deployment-product-card footer strong{color:#2991ff;font-size:11px;white-space:nowrap}
 .deployment-workspace{display:grid;gap:18px;max-width:1240px;margin:0 auto;padding-bottom:40px}.deployment-workspace-header{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:18px}.workbench-back{display:grid;place-items:center;width:42px;height:42px;border:1px solid rgba(127,127,127,.18);border-radius:14px;color:inherit;background:rgba(127,127,127,.08);font-size:19px}.deployment-workspace-header h1{margin:3px 0 5px;font-size:clamp(28px,4vw,44px);line-height:1.05;letter-spacing:-.035em}.deployment-workspace-header p{margin:0;color:var(--workspace-muted,#6e6e73);font-size:12px}.deployment-workspace-actions{display:flex;align-items:center;justify-content:flex-end;gap:9px;flex-wrap:wrap}.deployment-endpoint-hero{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px;padding:20px;border:1px solid rgba(41,145,255,.2);border-radius:22px;background:linear-gradient(135deg,rgba(0,113,227,.12),rgba(103,93,246,.05));box-shadow:inset 0 1px rgba(255,255,255,.08)}.deployment-endpoint-hero>div{display:grid;gap:7px;min-width:0}.deployment-endpoint-hero span{color:var(--workspace-muted,#6e6e73);font-size:10px;font-weight:720}.deployment-endpoint-hero code{overflow:auto;font-size:12px;white-space:nowrap}.deployment-workspace-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.deployment-workspace-metrics article{display:grid;grid-template-columns:1fr auto;align-items:end;gap:5px;padding:18px;border:1px solid rgba(127,127,127,.14);border-radius:18px;background:rgba(255,255,255,.68);box-shadow:0 8px 24px rgba(0,0,0,.045)}.deployment-workspace-metrics span{grid-column:1/-1;color:var(--workspace-muted,#6e6e73);font-size:10px}.deployment-workspace-metrics strong{font-size:24px;letter-spacing:-.03em}.deployment-workspace-metrics small{color:var(--workspace-muted,#6e6e73);font-size:9px}.deployment-work-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:16px}.deployment-work-panel{min-width:0;padding:22px;border:1px solid rgba(0,0,0,.07);border-radius:22px;background:rgba(255,255,255,.82);box-shadow:0 12px 36px rgba(0,0,0,.06);backdrop-filter:blur(24px) saturate(160%)}.deployment-work-panel>header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:18px}.deployment-work-panel h2{margin:3px 0 5px;font-size:20px}.deployment-work-panel header p{margin:0;color:var(--workspace-muted,#6e6e73);font-size:11px}.panel-kicker{color:#2991ff;font-size:9px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}.key-work-panel{grid-column:1/-1}.tester-work-panel{grid-column:span 6}.invocation-work-panel{grid-column:span 6}.key-table{display:grid}.tester-work-panel .deployment-tester{display:grid;grid-template-columns:1fr;gap:13px;margin:0;padding:0;border:0;background:transparent}.tester-work-panel .tester-heading{grid-column:auto}.tester-work-panel .deployment-tester pre{grid-column:auto}.invocation-work-panel .invocation-panel{margin:0;padding:0;border:0}.invocation-work-panel .invocation-row{grid-template-columns:82px minmax(100px,1fr) 68px minmax(130px,auto)}.invocation-work-panel .invocation-row>span:nth-of-type(3){display:none}.deployment-modal-card{width:min(620px,100%);grid-template-columns:repeat(2,minmax(0,1fr))}.deployment-modal-card>header,.deployment-modal-card>footer{grid-column:1/-1}.deployment-modal-card>label{display:grid;gap:7px}.asset-workspace.theme-dark .deployment-modal-card select,.asset-workspace.theme-dark .deployment-modal-card option{color:#f5f5f7;background:#242426;color-scheme:dark}.asset-workspace.theme-light .deployment-modal-card select,.asset-workspace.theme-light .deployment-modal-card option{color:#1d1d1f;background:#fff;color-scheme:light}
 .asset-workspace.theme-dark .deployment-product-card,.asset-workspace.theme-dark .deployment-work-panel{border-color:rgba(255,255,255,.1);background:rgba(28,28,30,.78);box-shadow:0 18px 48px rgba(0,0,0,.3)}.asset-workspace.theme-dark .deployment-workspace-metrics article{border-color:rgba(255,255,255,.1);background:rgba(28,28,30,.66);box-shadow:0 14px 34px rgba(0,0,0,.24)}.asset-workspace.theme-light .deployment-product-card,.asset-workspace.theme-light .deployment-work-panel{border-color:rgba(0,0,0,.07);background:rgba(255,255,255,.88)}.asset-workspace.theme-light .deployment-workspace-metrics article{background:rgba(255,255,255,.78)}

@@ -3,6 +3,7 @@ package com.agentpowflow.controlplane.orchestration;
 import com.agentpowflow.controlplane.canvas.CanvasDslMapper;
 import com.agentpowflow.controlplane.canvas.CanvasModels;
 import com.agentpowflow.controlplane.canvas.DslValidator;
+import com.agentpowflow.controlplane.integrations.JavaScriptToolService;
 import com.agentpowflow.controlplane.web.dto.WorkflowDto;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -26,19 +27,22 @@ public class WorkflowService {
     private final ObjectMapper objectMapper;
     private final CanvasDslMapper canvasDslMapper;
     private final DslValidator dslValidator;
+    private final JavaScriptToolService javaScriptToolService;
 
     public WorkflowService(
             WorkflowRepository workflowRepository,
             WorkflowVersionRepository versionRepository,
             ObjectMapper objectMapper,
             CanvasDslMapper canvasDslMapper,
-            DslValidator dslValidator
+            DslValidator dslValidator,
+            JavaScriptToolService javaScriptToolService
     ) {
         this.workflowRepository = workflowRepository;
         this.versionRepository = versionRepository;
         this.objectMapper = objectMapper;
         this.canvasDslMapper = canvasDslMapper;
         this.dslValidator = dslValidator;
+        this.javaScriptToolService = javaScriptToolService;
     }
 
     @Transactional(readOnly = true)
@@ -116,14 +120,15 @@ public class WorkflowService {
         if (!validation.valid()) {
             throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "workflow DSL validation failed");
         }
+        JsonNode pinnedDsl = pinJavaScriptTools(tenantId, actorId, readJson(workflow.getDraftDslJson()));
         int nextVersion = workflow.getLatestVersionNo() + 1;
         WorkflowVersionEntity version = new WorkflowVersionEntity();
         version.setWorkflowId(workflow.getWorkflowId());
         version.setTenantId(tenantId);
         version.setVersionNo(nextVersion);
-        version.setDslJson(workflow.getDraftDslJson());
+        version.setDslJson(writeJson(pinnedDsl));
         version.setLayoutJson(workflow.getDraftLayoutJson());
-        version.setChecksum(checksum(workflow.getDraftDslJson(), workflow.getDraftLayoutJson()));
+        version.setChecksum(checksum(writeJson(pinnedDsl), workflow.getDraftLayoutJson()));
         version.setPublishedBy(requireText(actorId, "actor id missing"));
         WorkflowVersionEntity saved = versionRepository.save(version);
 
@@ -214,6 +219,12 @@ public class WorkflowService {
 
     private JsonNode layoutOrEmpty(JsonNode layout) {
         return layout == null || layout.isNull() ? JsonNodeFactory.instance.objectNode() : layout;
+    }
+
+    private JsonNode pinJavaScriptTools(String tenantId,String actorId,JsonNode dsl){
+        JsonNode copy=dsl.deepCopy();JsonNode nodes=copy.path("nodes");if(!nodes.isArray())return copy;
+        for(JsonNode node:nodes){if(!"tool.javascript".equals(node.path("type").asText()))continue;JsonNode config=node.path("config");String toolId=config.path("tool_id").asText("");int version=config.path("version").asInt(0);if(toolId.isBlank()||version<1)throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,"JavaScript tool node is not configured");var owned=javaScriptToolService.resolveOwned(tenantId,actorId,toolId);JsonNode definition=javaScriptToolService.resolveVersion(tenantId,toolId,version);if(!definition.path("allow_workflow").asBoolean())throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,"JavaScript tool is not assigned to Workflow");((com.fasterxml.jackson.databind.node.ObjectNode)config).put("tool_name",owned.name()).set("definition",definition);}
+        return copy;
     }
 
     private String writeJson(JsonNode value) {

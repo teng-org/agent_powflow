@@ -16,6 +16,7 @@ public class NodeTypeRegistry {
         add("skill.call","AI 能力","Skill 调用","S","调用已发布 Skill",Map.of("text","string"),Map.of("text","string","answer","string"));
         add("tool.http","工具","HTTP 请求","↗","调用外部 API",Map.of("text","string"),Map.of("text","string","tool_response","object"));
         add("tool.mcp","工具","MCP 工具","M","调用已接入的 MCP 工具",Map.of("text","string"),Map.of("text","string","tool_response","object"));
+        add("tool.javascript","工具","JavaScript 工具","JS","运行已发布的沙箱函数",Map.of("text","string"),Map.of("text","string","tool_response","object"));
         add("human.approval","协作","人工审批","✓","等待人工决策",Map.of(),Map.of("text","string","answer","string","approval","object"));
         add("end","基础","结束","■","返回流程结果",Map.of("answer","string"),Map.of());
     }

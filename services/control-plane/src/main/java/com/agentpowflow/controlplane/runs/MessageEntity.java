@@ -21,7 +21,7 @@ public class MessageEntity {
     private String conversationId;
     @Column(name = "role", nullable = false, length = 32)
     private String role;
-    @Lob @Column(name = "content_json", nullable = false, columnDefinition = "text")
+    @Column(name = "content_json", nullable = false, columnDefinition = "text")
     private String contentJson;
     @Column(name = "related_run_id", length = 64)
     private String relatedRunId;

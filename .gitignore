@@ -1,8 +1,20 @@
 logs/
-data/backups/
-data/chat-plane/chat_api_pool_state.json
-data/chat-plane/chat_history_store.json
-docs/debug_logs/*.txt
+data/
+docs/
+scripts/
+tools/
+infra/scripts/
+AGENTS.md
+CONTRIBUTING.md
+SECURITY.md
+**/README.md
+!/README.md
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite3
+**/*.dump
+**/*.backup
 **/__pycache__/
 *.pyc
 
@@ -57,7 +69,6 @@ Thumbs.db
 *.log
 *.pid
 *.tmp
-*.bak
 
 # example frontend
 apps/example-frontend

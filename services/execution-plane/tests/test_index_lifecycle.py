@@ -204,6 +204,35 @@ class RagIndexLifecycleIntegrationTest(IsolatedPostgresCase):
         self.assertTrue(cleaned["deleted"])
         self.assertTrue(self.store.delete_document(self.tenant_id, self.kb_id, "doc-bad"))
 
+    def test_build_upgrades_legacy_flat_chunks_without_reembedding(self):
+        with self.store._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM chunk_parents WHERE tenant_id=%s AND kb_id=%s AND doc_id=%s",
+                (self.tenant_id, self.kb_id, self.doc_id),
+            )
+            cur.execute(
+                """UPDATE chunks SET parent_id='',section_path='{}'::text[]
+                WHERE tenant_id=%s AND kb_id=%s AND doc_id=%s""",
+                (self.tenant_id, self.kb_id, self.doc_id),
+            )
+
+        shadow = self.lifecycle.build_shadow(
+            self.tenant_id,
+            self.kb_id,
+            "rag2-shadow-legacy-flat",
+        )
+
+        self.assertEqual("PASSED", shadow["gate_status"])
+        self.assertEqual(1.0, shadow["quality_report"]["embedding_coverage"])
+        self.assertEqual(1.0, shadow["quality_report"]["parent_coverage"])
+        with self.store._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT count(*)::int AS count FROM chunks
+                WHERE tenant_id=%s AND kb_id=%s AND doc_id=%s AND parent_id<>''""",
+                (self.tenant_id, self.kb_id, self.doc_id),
+            )
+            self.assertEqual(2, int(cur.fetchone()["count"]))
+
     def test_required_retrieval_evaluation_blocks_activation_until_it_passes(self):
         self.lifecycle.build_shadow(
             self.tenant_id,

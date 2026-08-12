@@ -5,13 +5,13 @@ COPY services/control-plane/pom.xml /build/pom.xml
 RUN mvn -q -DskipTests dependency:go-offline
 
 COPY services/control-plane/src /build/src
-RUN mvn -q -DskipTests package
+RUN mvn -q -DskipTests package \
+    && cp /build/target/control-plane-*.jar /build/control-plane.jar
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app
 
-COPY --from=builder /build/target/control-plane-0.1.0-SNAPSHOT.jar /app/control-plane.jar
+COPY --from=builder /build/control-plane.jar /app/control-plane.jar
 
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "/app/control-plane.jar"]
-

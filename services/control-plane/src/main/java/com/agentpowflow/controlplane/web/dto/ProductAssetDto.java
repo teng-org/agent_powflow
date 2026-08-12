@@ -160,6 +160,7 @@ public final class ProductAssetDto {
             String trace_id,
             String output,
             JsonNode citations,
-            JsonNode metrics
+            JsonNode metrics,
+            JsonNode memory
     ) {}
 }

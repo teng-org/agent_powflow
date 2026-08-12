@@ -1,0 +1,7 @@
+package com.agentpowflow.controlplane.integrations;
+import jakarta.persistence.*; import java.time.Instant; import java.util.UUID;
+@Entity @Table(name="javascript_tool_versions",uniqueConstraints=@UniqueConstraint(name="uk_javascript_tool_version",columnNames={"tool_id","version_no"}))
+public class JavaScriptToolVersionEntity {
+ @Id @Column(name="version_id",length=64) private String versionId; @Column(name="tool_id",nullable=false,length=64) private String toolId; @Column(name="tenant_id",nullable=false,length=64) private String tenantId; @Column(name="version_no",nullable=false) private int versionNo; @Column(name="definition_json",nullable=false,columnDefinition="text") private String definitionJson; @Column(nullable=false,length=64) private String checksum; @Column(name="published_by",nullable=false,length=128) private String publishedBy; @Column(name="published_at",nullable=false) private Instant publishedAt;
+ @PrePersist void create(){if(versionId==null)versionId=UUID.randomUUID().toString();if(publishedAt==null)publishedAt=Instant.now();} public void setToolId(String v){toolId=v;} public void setTenantId(String v){tenantId=v;} public void setVersionNo(int v){versionNo=v;} public int getVersionNo(){return versionNo;} public void setDefinitionJson(String v){definitionJson=v;} public String getDefinitionJson(){return definitionJson;} public void setChecksum(String v){checksum=v;} public String getChecksum(){return checksum;} public void setPublishedBy(String v){publishedBy=v;} public Instant getPublishedAt(){return publishedAt;}
+}

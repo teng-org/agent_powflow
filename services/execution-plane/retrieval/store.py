@@ -4020,7 +4020,13 @@ class KnowledgeBaseStore:
             self.refresh_rag_index_manifest(tenant_id, kb_id)
         return {"processed": len(rows), "knowledge_bases": len(touched), "has_more": len(rows) >= limit}
 
-    def backfill_parent_child_structure(self, batch_documents: int = 100) -> dict:
+    def backfill_parent_child_structure(
+        self,
+        batch_documents: int = 100,
+        *,
+        tenant_id: str | None = None,
+        kb_id: str | None = None,
+    ) -> dict:
         """Attach deterministic parent contexts to legacy child chunks without re-embedding."""
         self._ensure_indexes()
         limit = max(1, min(int(batch_documents or 100), 500))
@@ -4030,9 +4036,11 @@ class KnowledgeBaseStore:
                 FROM chunks c
                 JOIN documents d ON d.tenant_id=c.tenant_id AND d.kb_id=c.kb_id AND d.doc_id=c.doc_id
                 WHERE c.parent_id='' AND d.status='INDEXED'
+                  AND (%s::text IS NULL OR c.tenant_id=%s)
+                  AND (%s::text IS NULL OR c.kb_id=%s)
                 GROUP BY c.tenant_id,c.kb_id,c.doc_id,d.filename
                 ORDER BY c.tenant_id,c.kb_id,c.doc_id LIMIT %s""",
-                (limit,),
+                (tenant_id, tenant_id, kb_id, kb_id, limit),
             )
             documents = [dict(row) for row in cur.fetchall()]
         chunk_count = 0

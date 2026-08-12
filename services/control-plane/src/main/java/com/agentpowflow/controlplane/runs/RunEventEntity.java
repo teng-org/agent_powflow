@@ -35,7 +35,7 @@ public class RunEventEntity {
     private String stage;
     @Column(name = "progress", nullable = false)
     private int progress;
-    @Lob @Column(name = "payload_json", nullable = false, columnDefinition = "text")
+    @Column(name = "payload_json", nullable = false, columnDefinition = "text")
     private String payloadJson = "{}";
     @Column(name = "source_service", nullable = false, length = 128)
     private String sourceService;

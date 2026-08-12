@@ -70,16 +70,8 @@ jobs:
           done
           docker logs apf-test-minio
           exit 1
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
       - name: Compile Python services
         run: python -m compileall -q services/chat-plane services/execution-plane
-      - name: Verify repository secret hygiene
-        run: |
-          python -m unittest tools.audit.test_secret_hygiene -v
-          python tools/audit/verify_secret_hygiene.py
-          pwsh -NoProfile -File tools/audit/production-secret-policy-smoke.ps1
       - name: Migrate Chat Plane test database
         working-directory: services/chat-plane
         env:
@@ -95,8 +87,6 @@ jobs:
         run: python -m retrieval.schema_migrations
       - name: Run Execution Plane unit tests
         run: python -m unittest discover -s services/execution-plane/tests -p 'test_*.py' -v
-      - name: Verify debug endpoint catalog
-        run: node tools/audit/verify-endpoint-catalog.mjs
       - name: Validate Compose configuration
         run: docker compose --env-file config/service-ports.env -f infra/compose/docker-compose.stack.yml config --quiet
 

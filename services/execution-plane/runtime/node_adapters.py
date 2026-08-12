@@ -137,6 +137,20 @@ class McpToolAdapter:
         return NodeExecutionResult(state_updates={str(config.get("output_field") or "tool_response"):payload,"text":text}, details={"connection_id":config["connection_id"],"tool_name":tool_name,"tool_cache_hit":cache_hit}, tool_called=not cache_hit, tool_cache_hit=cache_hit)
 
 
+class JavaScriptToolAdapter:
+    def execute(self, node: dict, context: NodeExecutionContext) -> NodeExecutionResult:
+        from runtime.javascript_tools import execute_javascript_tool
+        config = _config(node); definition = config.get("definition") if isinstance(config.get("definition"),dict) else {}
+        if not definition or not str(config.get("tool_id") or "").strip() or int(config.get("version") or 0) < 1:
+            raise RuntimeError("tool.javascript requires a published tool snapshot")
+        if not bool(definition.get("allow_workflow")):
+            raise RuntimeError("JavaScript tool is not assigned to Workflow")
+        arguments = _resolve_value(config.get("arguments") or {}, context.state)
+        result = execute_javascript_tool(definition, arguments)
+        output = result["output"]; text = json.dumps(output,ensure_ascii=False,sort_keys=True)
+        return NodeExecutionResult(state_updates={str(config.get("output_field") or "tool_response"):output,"text":text},details={"tool_id":config["tool_id"],"tool_version":config["version"]},tool_called=True)
+
+
 class RetrievalSearchAdapter:
     def execute(self, node: dict, context: NodeExecutionContext) -> NodeExecutionResult:
         config = _config(node)
@@ -302,6 +316,7 @@ class NodeAdapterRegistry:
             "skill.call": SkillCallAdapter(),
             "tool.http": HttpToolAdapter(),
             "tool.mcp": McpToolAdapter(),
+            "tool.javascript": JavaScriptToolAdapter(),
             "end": noop,
         }
 

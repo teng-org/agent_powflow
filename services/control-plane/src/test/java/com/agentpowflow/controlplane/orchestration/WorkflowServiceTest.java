@@ -4,6 +4,7 @@ import com.agentpowflow.controlplane.canvas.CanvasDslMapper;
 import com.agentpowflow.controlplane.canvas.ConnectionRuleEngine;
 import com.agentpowflow.controlplane.canvas.DslValidator;
 import com.agentpowflow.controlplane.canvas.NodeTypeRegistry;
+import com.agentpowflow.controlplane.integrations.JavaScriptToolService;
 import com.agentpowflow.controlplane.web.dto.WorkflowDto;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,7 +42,8 @@ class WorkflowServiceTest {
                 versionRepository,
                 objectMapper,
                 new CanvasDslMapper(objectMapper),
-                validator
+                validator,
+                mock(JavaScriptToolService.class)
         );
         when(workflowRepository.saveAndFlush(any(WorkflowEntity.class))).thenAnswer(invocation -> {
             WorkflowEntity entity = invocation.getArgument(0);

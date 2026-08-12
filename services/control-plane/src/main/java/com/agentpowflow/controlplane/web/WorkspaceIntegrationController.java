@@ -2,6 +2,7 @@ package com.agentpowflow.controlplane.web;
 
 import com.agentpowflow.controlplane.auth.TokenClaims;
 import com.agentpowflow.controlplane.integrations.IntegrationService;
+import com.agentpowflow.controlplane.integrations.JavaScriptToolService;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
@@ -9,7 +10,7 @@ import java.util.List;
 
 @RestController @RequestMapping("/api/v1")
 public class WorkspaceIntegrationController {
-    private final IntegrationService service; public WorkspaceIntegrationController(IntegrationService s){service=s;}
+    private final IntegrationService service; private final JavaScriptToolService jsTools; public WorkspaceIntegrationController(IntegrationService s,JavaScriptToolService j){service=s;jsTools=j;}
     @GetMapping("/skills") public Items<?> skills(Authentication a){var c=claims(a);return new Items<>(service.listSkills(c.tenantId(),c.sub()));}
     @PostMapping("/skills") public Item<?> createSkill(@RequestBody IntegrationService.SkillInput r,Authentication a){var c=claims(a);return new Item<>(service.saveSkill(c.tenantId(),c.sub(),null,r));}
     @PutMapping("/skills/{id}") public Item<?> saveSkill(@PathVariable String id,@RequestBody IntegrationService.SkillInput r,Authentication a){var c=claims(a);return new Item<>(service.saveSkill(c.tenantId(),c.sub(),id,r));}
@@ -22,6 +23,12 @@ public class WorkspaceIntegrationController {
     @PutMapping("/mcp-connections/{id}/tools") public Item<?> tools(@PathVariable String id,@RequestBody Tools r,Authentication a){var c=claims(a);return new Item<>(service.replaceTools(c.tenantId(),c.sub(),id,r.tools()));}
     @PostMapping("/mcp-connections/{id}/discover") public Item<?> discover(@PathVariable String id,Authentication a){var c=claims(a);return new Item<>(service.discoverTools(c.tenantId(),c.sub(),id));}
     @DeleteMapping("/mcp-connections/{id}") public Status deleteMcp(@PathVariable String id,Authentication a){var c=claims(a);service.deleteMcp(c.tenantId(),c.sub(),id);return new Status("ok");}
+    @GetMapping("/javascript-tools") public Items<?> javascriptTools(Authentication a){var c=claims(a);return new Items<>(jsTools.list(c.tenantId(),c.sub()));}
+    @PostMapping("/javascript-tools") public Item<?> createJavaScriptTool(@RequestBody JavaScriptToolService.ToolInput r,Authentication a){var c=claims(a);return new Item<>(jsTools.save(c.tenantId(),c.sub(),null,r));}
+    @PutMapping("/javascript-tools/{id}") public Item<?> saveJavaScriptTool(@PathVariable String id,@RequestBody JavaScriptToolService.ToolInput r,Authentication a){var c=claims(a);return new Item<>(jsTools.save(c.tenantId(),c.sub(),id,r));}
+    @PostMapping("/javascript-tools/{id}/test") public Item<?> testJavaScriptTool(@PathVariable String id,@RequestBody ToolArguments r,Authentication a){var c=claims(a);return new Item<>(jsTools.executeDraft(c.tenantId(),c.sub(),id,r.arguments()));}
+    @PostMapping("/javascript-tools/{id}/publish") public Item<?> publishJavaScriptTool(@PathVariable String id,Authentication a){var c=claims(a);return new Item<>(jsTools.publish(c.tenantId(),c.sub(),id));}
+    @DeleteMapping("/javascript-tools/{id}") public Status deleteJavaScriptTool(@PathVariable String id,Authentication a){var c=claims(a);jsTools.delete(c.tenantId(),c.sub(),id);return new Status("ok");}
     private TokenClaims claims(Authentication a){return (TokenClaims)a.getPrincipal();}
-    public record Item<T>(String status,T item){public Item(T i){this("ok",i);}} public record Items<T>(String status,List<T> items){public Items(List<T> i){this("ok",i);}} public record Status(String status){} public record Tools(List<JsonNode> tools){}
+    public record Item<T>(String status,T item){public Item(T i){this("ok",i);}} public record Items<T>(String status,List<T> items){public Items(List<T> i){this("ok",i);}} public record Status(String status){} public record Tools(List<JsonNode> tools){} public record ToolArguments(JsonNode arguments){}
 }

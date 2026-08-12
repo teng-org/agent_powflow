@@ -1494,6 +1494,9 @@ function normalizeApiErrorMessage(data, status) {
   if (status === 413 && data?.error_code === 'UPLOAD_LIMIT_EXCEEDED') {
     return String(data.message || '上传内容超过允许大小')
   }
+  if (status === 400 && data?.error_code === 'UPLOAD_FILE_REQUIRED') {
+    return String(data.message || '没有收到待上传文件，请重新选择文件')
+  }
   if (status === 413) return '上传内容超过允许大小'
   if (status >= 500) return '服务暂时不可用，请稍后再试'
   return '操作未能完成，请检查填写内容'
@@ -2153,7 +2156,7 @@ async function uploadDocument() {
       form.append('chunk_delimiter', uploadChunkPayload.chunk_delimiter)
     }
     for (const item of queuedItems) {
-      form.append('files', item.file, item.name)
+      form.append('file', item.file, item.name)
     }
     const data = await callApi(`/api/v1/admin/kbs/${encodeURIComponent(selectedKbId.value)}/documents/upload`, {
       method: 'POST',
@@ -3077,13 +3080,18 @@ function addUploadFiles(files) {
     <section class="card panel fade-up kb-main-panel" style="animation-delay: 0.08s">
       <header class="kb-page-header">
         <div class="kb-page-title">
-          <button class="kb-back-link" type="button" @click="returnToWorkspaceConsole">‹ 返回控制台</button>
-          <span class="kb-page-kicker">知识库文档管理</span>
-          <h1>{{ selectedKb?.name || '正在加载知识库' }}</h1>
-          <div class="kb-page-stats" aria-label="知识库统计">
-            <span><strong>{{ selectedKbDocumentCount }}</strong> 个文档</span>
-            <span><strong>{{ selectedKbChunkCount }}</strong> 个切片</span>
-            <span>{{ selectedKb?.frozen ? '知识库已冻结' : '知识库可用' }}</span>
+          <div class="kb-page-context">
+            <button class="kb-back-link" type="button" @click="returnToWorkspaceConsole">‹ 返回控制台</button>
+            <span class="kb-page-context-divider" aria-hidden="true"></span>
+            <span class="kb-page-kicker">知识库文档管理</span>
+          </div>
+          <div class="kb-page-heading-row">
+            <h1 :title="selectedKb?.name || ''">{{ selectedKb?.name || '正在加载知识库' }}</h1>
+            <div class="kb-page-stats" aria-label="知识库统计">
+              <span><strong>{{ selectedKbDocumentCount }}</strong> 个文档</span>
+              <span class="kb-stat-chunks"><strong>{{ selectedKbChunkCount }}</strong> 个切片</span>
+              <span class="kb-stat-status" :class="{ frozen: selectedKb?.frozen }">{{ selectedKb?.frozen ? '知识库已冻结' : '知识库可用' }}</span>
+            </div>
           </div>
         </div>
         <div class="kb-page-actions">

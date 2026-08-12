@@ -12,7 +12,7 @@ public class SkillEntity {
     @Column(nullable=false, length=1000) private String description = "";
     @Column(nullable=false, length=32) private String status = "DRAFT";
     @Column(name="latest_version_no", nullable=false) private int latestVersionNo;
-    @Lob @Column(name="draft_definition_json", nullable=false, columnDefinition="text") private String draftDefinitionJson = "{}";
+    @Column(name="draft_definition_json", nullable=false, columnDefinition="text") private String draftDefinitionJson = "{}";
     @Column(name="created_by", nullable=false, length=128) private String createdBy;
     @Column(name="updated_by", nullable=false, length=128) private String updatedBy;
     @Column(name="created_at", nullable=false) private Instant createdAt;

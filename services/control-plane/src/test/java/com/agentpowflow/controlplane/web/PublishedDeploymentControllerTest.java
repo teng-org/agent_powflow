@@ -9,6 +9,7 @@ import com.agentpowflow.controlplane.runs.RunService;
 import com.agentpowflow.controlplane.web.dto.ProductAssetDto;
 import com.agentpowflow.controlplane.web.dto.RunDto;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -37,7 +38,7 @@ class PublishedDeploymentControllerTest {
         productAssetService = mock(ProductAssetService.class);
         runService = mock(RunService.class);
         agentChatClient = mock(AgentChatClient.class);
-        controller = new PublishedDeploymentController(productAssetService, runService, agentChatClient);
+        controller = new PublishedDeploymentController(productAssetService, runService, agentChatClient, new ObjectMapper());
     }
 
     @Test
@@ -52,7 +53,8 @@ class PublishedDeploymentControllerTest {
         JsonNode metrics = JsonNodeFactory.instance.objectNode().put("total_ms", 1200.5);
         when(agentChatClient.invoke(any(), any(), any(), any(), any()))
                 .thenReturn(new AgentChatClient.AgentResult(
-                        "agent-run", "conversation-1", "调用完成", citations, metrics
+                        "agent-run", "conversation-1", "调用完成", citations, metrics,
+                        JsonNodeFactory.instance.objectNode().put("recent_messages", 2)
                 ));
 
         Object response = controller.invoke(
@@ -70,6 +72,33 @@ class PublishedDeploymentControllerTest {
                 eq("invocation-1"), eq("agent-run"), any(Long.class), eq("COMPLETED"),
                 eq((long) "调用完成".getBytes(StandardCharsets.UTF_8).length), eq(null)
         );
+    }
+
+    @Test
+    void openAiCompletionReturnsCompatibleShapeAndMemoryHandle() {
+        ProductAssetService.ResolvedInvocation resolved = resolved("AGENT");
+        DeploymentInvocationEntity audit = audit("invocation-openai", "trace-openai");
+        when(productAssetService.resolveInvocation("agent-api", "pf_live_secret")).thenReturn(resolved);
+        when(productAssetService.beginInvocation(eq(resolved), eq("trace-openai"), any(Long.class))).thenReturn(audit);
+        when(agentChatClient.invoke(any(), any(), any(), any(), eq("conversation-existing")))
+                .thenReturn(new AgentChatClient.AgentResult(
+                        "run-openai", "conversation-existing", "hello", JsonNodeFactory.instance.arrayNode(),
+                        JsonNodeFactory.instance.objectNode().put("total_ms", 10),
+                        JsonNodeFactory.instance.objectNode().put("session_recall_items", 1)
+                ));
+        JsonNode body = JsonNodeFactory.instance.objectNode()
+                .put("model", "agent-api")
+                .put("conversation_id", "conversation-existing")
+                .put("stream", false)
+                .set("messages", JsonNodeFactory.instance.arrayNode()
+                        .add(JsonNodeFactory.instance.objectNode().put("role", "user").put("content", "hello")));
+
+        JsonNode response = (JsonNode) controller.openAiChatCompletions("agent-api", body, request("trace-openai"));
+
+        assertEquals("chat.completion", response.path("object").asText());
+        assertEquals("hello", response.path("choices").path(0).path("message").path("content").asText());
+        assertEquals("conversation-existing", response.path("powflow").path("conversation_id").asText());
+        assertEquals(1, response.path("powflow").path("memory").path("session_recall_items").asInt());
     }
 
     @Test

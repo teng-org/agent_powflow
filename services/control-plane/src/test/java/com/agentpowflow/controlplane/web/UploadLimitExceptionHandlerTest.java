@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -41,5 +42,20 @@ class UploadLimitExceptionHandlerTest {
         var response = handler.uploadLimit(new MaxUploadSizeExceededException(1), request);
 
         assertThat(response.getBody().get("trace_id")).asString().hasSize(36).isNotEqualTo("x".repeat(129));
+    }
+
+    @Test
+    void returnsProductErrorWhenMultipartFilePartIsMissing() {
+        UploadLimitExceptionHandler handler = new UploadLimitExceptionHandler(new TaskDispatchProperties());
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.addHeader("X-Trace-Id", "upload-missing-file");
+
+        var response = handler.missingPart(new MissingServletRequestPartException("file"), request);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).containsEntry("code", "upload_file_required");
+        assertThat(response.getBody()).containsEntry("error_code", "UPLOAD_FILE_REQUIRED");
+        assertThat(response.getBody()).containsEntry("trace_id", "upload-missing-file");
+        assertThat(response.getBody().get("message")).asString().contains("重新选择文件");
     }
 }

@@ -92,7 +92,7 @@ async function load() {
   }
 }
 
-async function runAction(key, action, success) {
+async function runAction(key, action, success, resolveError = null) {
   state.busy = key
   state.error = ''
   try {
@@ -101,7 +101,9 @@ async function runAction(key, action, success) {
     await load()
     notify('success', success)
   } catch (error) {
-    state.error = error instanceof Error ? error.message : '操作未能完成。'
+    const fallback = error instanceof Error ? error.message : '操作未能完成。'
+    if (resolveError) await load()
+    state.error = resolveError?.() || fallback
     notify('error', '操作未能完成', state.error)
   } finally {
     state.busy = ''
@@ -121,7 +123,10 @@ async function buildIndex() {
       require_evaluation: buildForm.require_evaluation,
       qdrant_batch_size: Number(buildForm.qdrant_batch_size),
     },
-  }), '新索引版本已构建')
+  }), '新索引版本已构建', () => {
+    const failed = manifests.value.find((item) => item.index_revision === buildForm.revision.trim() && item.status === 'FAILED')
+    return failed ? buildFailureText(failed) : ''
+  })
   if (!state.error) state.showBuild = false
 }
 
@@ -209,6 +214,19 @@ function formatDate(value) {
   return new Date(value).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
+function buildFailureText(item) {
+  const checks = item?.quality_report?.checks || {}
+  const failed = Object.entries(checks).filter(([, passed]) => !passed).map(([name]) => ({
+    non_empty: '索引内容为空',
+    embedding_complete: '向量覆盖不完整',
+    qdrant_complete: '向量库写入不完整',
+    lexical_coverage: '词法索引覆盖不足',
+    parent_coverage: '父子结构覆盖不足',
+  })[name] || name)
+  if (failed.length) return `完整性检查未通过：${failed.join('、')}`
+  return item?.build_error ? '索引构建失败，请清理后重新构建。' : ''
+}
+
 watch(() => [props.kbId, props.token], () => {
   state.expandedRevision = ''
   load()
@@ -267,6 +285,7 @@ onMounted(load)
               <span class="rag-chevron">⌄</span>
             </button>
             <div v-if="state.expandedRevision === item.index_revision" class="rag-version-detail">
+              <p v-if="item.status === 'FAILED'" class="rag-build-error">{{ buildFailureText(item) }}</p>
               <dl>
                 <div><dt>文档快照</dt><dd>{{ metric(item.document_count) }}</dd></div>
                 <div><dt>向量覆盖</dt><dd>{{ percent(item.quality_report?.embedding_coverage) }}</dd></div>
@@ -326,6 +345,7 @@ onMounted(load)
 <style scoped>
 .rag-workbench{display:grid;gap:16px;min-width:0;padding-bottom:24px;color:var(--ink)}
 .rag-alert{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;padding:11px 13px;border:1px solid color-mix(in srgb,var(--danger) 28%,transparent);border-radius:13px;color:var(--danger);background:var(--danger-soft)}.rag-alert>span{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:color-mix(in srgb,var(--danger) 14%,transparent);font-weight:800}.rag-alert p{margin:0;font-size:12px}.rag-alert button{border:0;color:inherit;background:transparent}
+.rag-build-error{margin:0;padding:10px 12px;border:1px solid color-mix(in srgb,var(--danger) 24%,transparent);border-radius:11px;color:var(--danger);background:var(--danger-soft);font-size:11px;line-height:1.5}
 .rag-summary-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.rag-summary-card{position:relative;display:grid;align-content:start;gap:7px;min-height:126px;padding:18px;border:1px solid var(--border);border-radius:19px;background:var(--bg-card);box-shadow:0 10px 30px rgba(0,0,0,.08);overflow:hidden}.rag-summary-card>span{color:var(--ink-muted);font-size:11px}.rag-summary-card>strong{overflow:hidden;color:var(--ink-strong);font-size:22px;letter-spacing:-.025em;text-overflow:ellipsis;white-space:nowrap}.rag-summary-card>strong em{font-size:11px;font-style:normal;font-weight:600}.rag-summary-card>small{color:var(--ink-muted);font-size:10px;line-height:1.5}.spectral-card::after{position:absolute;right:-35px;bottom:-65px;width:180px;height:140px;border-radius:50%;background:conic-gradient(from 40deg,rgba(22,139,255,.3),rgba(108,92,255,.28),rgba(38,214,185,.18),rgba(22,139,255,.3));filter:blur(22px);content:""}
 .rag-lineage-panel{display:grid;gap:18px;padding:20px;border:1px solid var(--border);border-radius:22px;background:var(--bg-card);box-shadow:var(--shadow)}.rag-lineage-panel>header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}.rag-lineage-panel h3{margin:3px 0 5px;color:var(--ink-strong);font-size:19px}.rag-lineage-panel header p{max-width:640px;margin:0;color:var(--ink-muted);font-size:11px;line-height:1.55}.rag-kicker{color:var(--accent);font-size:9px;font-weight:760;letter-spacing:.1em;text-transform:uppercase}.rag-header-actions,.rag-version-actions{display:flex;gap:8px;flex-wrap:wrap}
 .rag-loading{display:grid;gap:9px;padding:20px}.rag-loading span{height:54px;border-radius:15px;background:linear-gradient(90deg,var(--bg-soft),color-mix(in srgb,var(--bg-soft) 40%,var(--accent-soft)),var(--bg-soft));background-size:200% 100%;animation:rag-shimmer 1.3s linear infinite}.rag-empty{display:grid;justify-items:center;padding:46px 20px;text-align:center}.rag-empty-mark{display:grid;place-items:center;width:54px;height:54px;border:1px solid color-mix(in srgb,var(--accent) 24%,transparent);border-radius:18px;color:var(--accent);background:var(--accent-soft);font-size:25px}.rag-empty h3{margin:16px 0 6px}.rag-empty p{max-width:460px;margin:0 0 18px;color:var(--ink-muted);font-size:11px;line-height:1.6}

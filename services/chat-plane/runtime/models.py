@@ -56,6 +56,66 @@ class AgentRetrievalConfig(BaseModel):
     rerank_required: bool = False
 
 
+class AgentMemoryConfig(BaseModel):
+    mode: Literal["none", "short_term", "long_term"] = "long_term"
+    preset: Literal["private_assistant", "customer_service", "consulting", "stateless", "custom"] = "private_assistant"
+    recent_messages_limit: int = Field(default=12, ge=1, le=50)
+    context_token_budget: int = Field(default=1800, ge=200, le=8000)
+    compress_trigger_messages: int = Field(default=24, ge=8, le=200)
+    summary_enabled: bool = True
+    user_profile_enabled: bool = True
+    episodic_enabled: bool = True
+    session_recall_enabled: bool = True
+    memory_item_max: int = Field(default=200, ge=20, le=2000)
+
+
+class AgentPromptVariable(BaseModel):
+    key: Literal["current_datetime"] = "current_datetime"
+    enabled: bool = True
+    calendar: Literal["gregorian", "lunar", "both"] = "both"
+    timezone: str = Field(default="Asia/Shanghai", max_length=64)
+
+
+class AgentSkillConfig(BaseModel):
+    skill_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(default="", max_length=128)
+    version: int = Field(default=1, ge=1)
+    instructions: str = Field(default="", max_length=30000)
+    description: str = Field(default="", max_length=1000)
+    input_schema: Dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
+    output_schema: Dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
+    max_tokens: int = Field(default=800, ge=64, le=8192)
+
+
+class AgentMcpToolConfig(BaseModel):
+    connection_id: str = Field(min_length=1, max_length=128)
+    connection_name: str = Field(default="", max_length=128)
+    endpoint_url: str = Field(default="", max_length=2000)
+    auth: Dict[str, str] = Field(default_factory=dict)
+    tool_name: str = Field(min_length=1, max_length=256)
+    title: str = Field(default="", max_length=256)
+    description: str = Field(default="", max_length=2000)
+    input_schema: Dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
+    annotations: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentJavaScriptToolConfig(BaseModel):
+    tool_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(default="", max_length=128)
+    description: str = Field(default="", max_length=1000)
+    version: int = Field(default=1, ge=1)
+    definition: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentToolPolicy(BaseModel):
+    mode: Literal["none", "auto", "required"] = "auto"
+    max_rounds: int = Field(default=3, ge=1, le=8)
+    timeout_seconds: int = Field(default=30, ge=1, le=120)
+    result_max_chars: int = Field(default=12000, ge=500, le=50000)
+    allow_write_tools: bool = False
+    failure_mode: Literal["continue", "fail"] = "continue"
+
+
 class AgentRuntimeConfig(BaseModel):
     agent_id: Optional[str] = Field(default=None, max_length=128)
     role: str = Field(default="", max_length=500)
@@ -65,8 +125,15 @@ class AgentRuntimeConfig(BaseModel):
     temperature: float = Field(default=0.2, ge=0, le=2)
     top_p: float = Field(default=1.0, gt=0, le=1)
     max_tokens: int = Field(default=4096, ge=64, le=32768)
+    prohibited_rules: str = Field(default="", max_length=12000)
     retrieval: AgentRetrievalConfig = Field(default_factory=AgentRetrievalConfig)
     reply_examples: List[AgentReplyExample] = Field(default_factory=list, max_length=8)
+    memory: AgentMemoryConfig = Field(default_factory=AgentMemoryConfig)
+    prompt_variables: List[AgentPromptVariable] = Field(default_factory=list, max_length=8)
+    skills: List[AgentSkillConfig] = Field(default_factory=list, max_length=20)
+    mcp_tools: List[AgentMcpToolConfig] = Field(default_factory=list, max_length=50)
+    javascript_tools: List[AgentJavaScriptToolConfig] = Field(default_factory=list, max_length=50)
+    tool_policy: AgentToolPolicy = Field(default_factory=AgentToolPolicy)
 
 
 class ChatRequest(BaseModel):

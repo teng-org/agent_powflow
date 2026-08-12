@@ -781,6 +781,49 @@ class LlmClient:
         content = (((obj.get("choices") or [{}])[0]).get("message") or {}).get("content")
         return str(content or "").strip()
 
+    async def complete_tool_plan(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        *,
+        tenant_id: str = "*",
+        tool_choice: str = "auto",
+        max_tokens: int = 700,
+    ) -> Dict[str, Any]:
+        """Request one provider-native function call, falling back to a strict JSON planner."""
+        if self.provider_mode == "mock":
+            return {"content": "", "tool_calls": []}
+        payload = {
+            "model": "",
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice if tool_choice in {"auto", "required", "none"} else "auto",
+            "parallel_tool_calls": False,
+            "temperature": 0,
+            "max_tokens": max(64, min(int(max_tokens), 2048)),
+            "stream": False,
+        }
+        text = "\n".join(str((item or {}).get("content") or "") for item in messages)
+        obj = await self._request_json(
+            task="chat_llm", path="/chat/completions", payload=payload,
+            tenant_id=tenant_id, input_text_for_usage=text,
+        )
+        message = (((obj.get("choices") or [{}])[0]).get("message") or {})
+        calls: List[Dict[str, Any]] = []
+        for item in message.get("tool_calls") or []:
+            fn = item.get("function") or {}
+            try:
+                arguments = json.loads(str(fn.get("arguments") or "{}"))
+            except Exception:
+                arguments = {}
+            if isinstance(arguments, dict):
+                calls.append({
+                    "call_id": str(item.get("id") or uuid.uuid4().hex),
+                    "name": str(fn.get("name") or ""),
+                    "arguments": arguments,
+                })
+        return {"content": str(message.get("content") or ""), "tool_calls": calls}
+
     async def embed_text(
         self,
         text: str,

@@ -386,6 +386,16 @@ class RagIndexLifecycle:
         kb = self.store.get_kb(tenant_id, kb_id)
         if not kb:
             raise IndexLifecycleError("knowledge base not found")
+        # RAG 2 candidates require parent-child context. Upgrade legacy flat
+        # chunks deterministically in place; existing embeddings remain valid.
+        while True:
+            backfill = self.store.backfill_parent_child_structure(
+                batch_documents=500,
+                tenant_id=tenant_id,
+                kb_id=kb_id,
+            )
+            if not bool(backfill.get("has_more")):
+                break
         active_revision = self.store.get_active_index_revision(tenant_id, kb_id)
         if revision == active_revision:
             raise IndexLifecycleError("shadow revision must differ from the active revision")
@@ -480,7 +490,12 @@ class RagIndexLifecycle:
                     ),
                 )
             if not report["passed"]:
-                raise IndexQualityGateFailed("shadow index integrity gate failed")
+                failed_checks = ", ".join(
+                    key for key, passed in report["checks"].items() if not passed
+                )
+                raise IndexQualityGateFailed(
+                    f"shadow index integrity gate failed: {failed_checks or 'unknown'}"
+                )
             return {
                 "tenant_id": tenant_id,
                 "kb_id": kb_id,

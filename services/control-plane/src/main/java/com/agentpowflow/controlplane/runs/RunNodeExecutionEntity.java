@@ -36,7 +36,7 @@ public class RunNodeExecutionEntity {
     private Instant completedAt;
     @Column(name = "duration_ms")
     private Long durationMs;
-    @Lob @Column(name = "details_json", nullable = false, columnDefinition = "text")
+    @Column(name = "details_json", nullable = false, columnDefinition = "text")
     private String detailsJson = "{}";
     @Column(name = "error_message", nullable = false, length = 2000)
     private String errorMessage = "";

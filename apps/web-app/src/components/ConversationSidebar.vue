@@ -122,6 +122,7 @@ const productNav = [
   { id: 'workflows', name: 'Workflow', icon: '◇' },
   { id: 'skills', name: 'Skill 管理', icon: 'S' },
   { id: 'mcp', name: 'MCP 接入', icon: 'M' },
+  { id: 'tools', name: '工具工作台', icon: 'JS' },
   { id: 'deployments', name: 'API 发布', icon: '↗' },
   { id: 'members', name: '团队与权限', icon: '◎' },
 ]

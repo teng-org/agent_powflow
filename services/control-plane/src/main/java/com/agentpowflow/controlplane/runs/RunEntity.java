@@ -35,13 +35,13 @@ public class RunEntity {
     private String stage = "QUEUED";
     @Column(name = "progress", nullable = false)
     private int progress;
-    @Lob @Column(name = "input_payload_json", nullable = false, columnDefinition = "text")
+    @Column(name = "input_payload_json", nullable = false, columnDefinition = "text")
     private String inputPayloadJson = "{}";
-    @Lob @Column(name = "output_payload_json", nullable = false, columnDefinition = "text")
+    @Column(name = "output_payload_json", nullable = false, columnDefinition = "text")
     private String outputPayloadJson = "{}";
-    @Lob @Column(name = "citations_json", nullable = false, columnDefinition = "text")
+    @Column(name = "citations_json", nullable = false, columnDefinition = "text")
     private String citationsJson = "[]";
-    @Lob @Column(name = "metrics_json", nullable = false, columnDefinition = "text")
+    @Column(name = "metrics_json", nullable = false, columnDefinition = "text")
     private String metricsJson = "{}";
     @Column(name = "error_code", nullable = false, length = 128)
     private String errorCode = "";

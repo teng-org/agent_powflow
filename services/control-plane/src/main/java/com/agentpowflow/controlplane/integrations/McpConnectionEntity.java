@@ -15,7 +15,7 @@ public class McpConnectionEntity {
     @Column(name="auth_type", nullable=false, length=32) private String authType="NONE";
     @Column(name="secret_ref", length=256) private String secretRef;
     @Column(nullable=false, length=32) private String status="DRAFT";
-    @Lob @Column(name="tools_json", nullable=false, columnDefinition="text") private String toolsJson="[]";
+    @Column(name="tools_json", nullable=false, columnDefinition="text") private String toolsJson="[]";
     @Column(name="created_by", nullable=false, length=128) private String createdBy;
     @Column(name="updated_by", nullable=false, length=128) private String updatedBy;
     @Column(name="created_at", nullable=false) private Instant createdAt;

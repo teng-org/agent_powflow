@@ -6,7 +6,7 @@ from typing import Any
 
 SUPPORTED_NODE_TYPES = {
     "start", "condition.if", "parallel.fork", "parallel.join",
-    "llm.generate", "retrieval.search", "skill.call", "tool.http", "tool.mcp", "human.approval", "end",
+    "llm.generate", "retrieval.search", "skill.call", "tool.http", "tool.mcp", "tool.javascript", "human.approval", "end",
 }
 
 

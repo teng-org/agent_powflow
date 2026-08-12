@@ -9,6 +9,7 @@ const props = defineProps({
   knowledgeBases: { type: Array, default: () => [] },
   skills: { type: Array, default: () => [] },
   mcpConnections: { type: Array, default: () => [] },
+  javascriptTools: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['close', 'saved', 'published', 'notify'])
 
@@ -33,13 +34,14 @@ const fallbackPalette = [
   { group: '工具与协作', items: [
     { type: 'tool.http', label: 'HTTP 请求', icon: '↗', color: '#bf5af2', note: '调用外部 API' },
     { type: 'tool.mcp', label: 'MCP 工具', icon: 'M', color: '#ff9f0a', note: '调用已接入工具' },
+    { type: 'tool.javascript', label: 'JS 工具', icon: 'JS', color: '#32d74b', note: '运行已发布函数' },
     { type: 'human.approval', label: '人工审批', icon: '✓', color: '#ff375f', note: '等待人工决策' },
     { type: 'parallel.fork', label: '并行分叉', icon: '⑂', color: '#5e5ce6', note: '启动多个并行分支' },
     { type: 'parallel.join', label: '并行汇合', icon: '⑁', color: '#64d2ff', note: '汇合并选择输出' },
   ] },
 ]
 const palette = ref(fallbackPalette)
-const nodeColors = { start:'#34c759',end:'#ff453a','condition.if':'#ff9f0a','llm.generate':'#0a84ff','retrieval.search':'#30b0c7','skill.call':'#5e5ce6','tool.http':'#bf5af2','tool.mcp':'#ff9f0a','human.approval':'#ff375f','parallel.fork':'#5e5ce6','parallel.join':'#64d2ff' }
+const nodeColors = { start:'#34c759',end:'#ff453a','condition.if':'#ff9f0a','llm.generate':'#0a84ff','retrieval.search':'#30b0c7','skill.call':'#5e5ce6','tool.http':'#bf5af2','tool.mcp':'#ff9f0a','tool.javascript':'#32d74b','human.approval':'#ff375f','parallel.fork':'#5e5ce6','parallel.join':'#64d2ff' }
 const nodeDefinition = (type) => palette.value.flatMap((group) => group.items).find((item) => item.type === type) || { label: type, icon: '•', color: '#8e8e93', note: '' }
 
 const form = reactive({ name: '', description: '', revision: 0, status: 'DRAFT', latestVersion: 0 })
@@ -151,6 +153,7 @@ function defaultConfig(type) {
   if (type === 'condition.if') return { field: 'text', operator: 'truthy', value: '' }
   if (type === 'tool.http') return { method: 'GET', url: 'https://', timeout_seconds: 30, output_field: 'tool_response' }
   if (type === 'tool.mcp') { const item=props.mcpConnections.find(x=>(x.tools||[]).length); const tool=item?.tools?.[0]; return item&&tool?{connection_id:item.connection_id,connection_name:item.name,endpoint_url:item.endpoint_url,auth:{type:item.auth_type,secret_ref:item.secret_ref||''},tool_name:tool.name,tool_snapshot:clone(tool),arguments:{},output_field:'tool_response',timeout_seconds:30}:{connection_id:'',tool_name:'',arguments:{},output_field:'tool_response',timeout_seconds:30} }
+  if (type === 'tool.javascript') { const item=props.javascriptTools.find(x=>x.latest_version_no>0&&x.latest_definition?.allow_workflow); return item?{tool_id:item.tool_id,tool_name:item.name,version:item.latest_version_no,definition:clone(item.latest_definition),arguments:{},output_field:'tool_response'}:{tool_id:'',version:0,definition:{},arguments:{},output_field:'tool_response'} }
   if (type === 'human.approval') return { title: '请审批此流程', instructions: '', assignee_roles: ['TENANT_ADMIN'], timeout_seconds: 86400, timeout_action: 'reject' }
   if (type === 'parallel.join') return { answer_branch: '' }
   return {}
@@ -404,6 +407,7 @@ function localValidation() {
       if (!validUrl || !['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(node.config?.method) || timeout < 1 || timeout > 60) add('HTTP_TOOL_CONFIG_INVALID', '请填写有效的 HTTP(S) 地址、方法和 1–60 秒超时。', node.id)
     }
     if (node.type === 'tool.mcp' && (!String(node.config?.connection_id||'').trim() || !String(node.config?.endpoint_url||'').trim() || !String(node.config?.tool_name||'').trim())) add('MCP_TOOL_CONFIG_INVALID', '请选择 MCP 连接和工具。', node.id)
+    if (node.type === 'tool.javascript' && (!String(node.config?.tool_id||'').trim() || Number(node.config?.version||0)<1)) add('JAVASCRIPT_TOOL_CONFIG_INVALID','请选择已发布且分配给 Workflow 的 JavaScript 工具。',node.id)
     if (node.type === 'llm.generate') {
       const promptInvalid = node.config?.prompt != null && typeof node.config.prompt !== 'string'
       const systemPromptInvalid = node.config?.system_prompt != null && typeof node.config.system_prompt !== 'string'
@@ -699,6 +703,11 @@ nextTick(() => { if (graph.nodes.length && !(props.workflow.draft_layout?.positi
             <label>工具<select v-model="selectedNode.config.tool_name" @change="chooseMcpTool($event.target.value)"><option value="">请选择工具</option><option v-for="tool in (mcpConnections.find(x=>x.connection_id===selectedNode.config.connection_id)?.tools||[])" :key="tool.name" :value="tool.name">{{ tool.title||tool.name }}</option></select></label>
             <label>参数映射（JSON）<textarea :value="JSON.stringify(selectedNode.config.arguments||{},null,2)" rows="7" @change="selectedNode.config.arguments=JSON.parse($event.target.value);markDirty()" /></label>
             <label>输出字段<input v-model="selectedNode.config.output_field" @input="markDirty" /></label><small class="field-help">远端工具注解不视为可信；请在发布前核对工具用途和数据边界。</small>
+          </template>
+          <template v-else-if="selectedNode.type === 'tool.javascript'">
+            <label>已发布工具<select :value="selectedNode.config.tool_id" @change="(()=>{const item=javascriptTools.find(x=>x.tool_id===$event.target.value);Object.assign(selectedNode.config,item?{tool_id:item.tool_id,tool_name:item.name,version:item.latest_version_no,definition:clone(item.latest_definition)}:{tool_id:'',version:0,definition:{}});markDirty()})()"><option value="">请选择工具</option><option v-for="item in javascriptTools.filter(x=>x.latest_version_no>0&&x.latest_definition?.allow_workflow)" :key="item.tool_id" :value="item.tool_id">{{ item.name }} · v{{ item.latest_version_no }}</option></select></label>
+            <label>参数映射（JSON）<textarea :value="JSON.stringify(selectedNode.config.arguments||{},null,2)" rows="6" @change="(()=>{try{selectedNode.config.arguments=JSON.parse($event.target.value);markDirty()}catch{}})()" /></label>
+            <label>输出字段<input v-model="selectedNode.config.output_field" @input="markDirty" /></label>
           </template>
           <template v-else-if="selectedNode.type === 'human.approval'">
             <label>审批标题<input v-model="selectedNode.config.title" @input="markDirty" /></label><label>审批说明<textarea v-model="selectedNode.config.instructions" rows="4" @input="markDirty" /></label><label>审批角色<input :value="(selectedNode.config.assignee_roles || []).join('，')" @input="updateRoles($event.target.value)" /></label><div class="field-grid"><label>超时（秒）<input v-model.number="selectedNode.config.timeout_seconds" type="number" min="60" max="604800" @input="markDirty" /></label><label>超时动作<select v-model="selectedNode.config.timeout_action" @change="markDirty"><option value="reject">拒绝</option><option value="approve">通过</option></select></label></div>

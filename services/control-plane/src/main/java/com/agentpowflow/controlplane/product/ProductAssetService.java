@@ -1,6 +1,8 @@
 package com.agentpowflow.controlplane.product;
 
 import com.agentpowflow.controlplane.orchestration.WorkflowService;
+import com.agentpowflow.controlplane.integrations.IntegrationService;
+import com.agentpowflow.controlplane.integrations.JavaScriptToolService;
 import com.agentpowflow.controlplane.web.dto.ProductAssetDto;
 import com.agentpowflow.controlplane.web.dto.WorkflowDto;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -38,6 +40,8 @@ public class ProductAssetService {
     private final DeploymentApiKeyRepository apiKeyRepository;
     private final DeploymentInvocationRepository invocationRepository;
     private final WorkflowService workflowService;
+    private final IntegrationService integrationService;
+    private final JavaScriptToolService javaScriptToolService;
     private final ObjectMapper objectMapper;
     private final PasswordEncoder passwordEncoder;
 
@@ -48,6 +52,8 @@ public class ProductAssetService {
             DeploymentApiKeyRepository apiKeyRepository,
             DeploymentInvocationRepository invocationRepository,
             WorkflowService workflowService,
+            IntegrationService integrationService,
+            JavaScriptToolService javaScriptToolService,
             ObjectMapper objectMapper,
             PasswordEncoder passwordEncoder
     ) {
@@ -57,6 +63,8 @@ public class ProductAssetService {
         this.apiKeyRepository = apiKeyRepository;
         this.invocationRepository = invocationRepository;
         this.workflowService = workflowService;
+        this.integrationService = integrationService;
+        this.javaScriptToolService = javaScriptToolService;
         this.objectMapper = objectMapper;
         this.passwordEncoder = passwordEncoder;
     }
@@ -130,7 +138,71 @@ public class ProductAssetService {
         snapshot.put("name", entity.getName());
         snapshot.put("description", entity.getDescription());
         snapshot.put("instructions", entity.getInstructions());
-        snapshot.set("model_config", readJson(entity.getModelConfigJson()));
+        ObjectNode publishedModelConfig = (ObjectNode) readJson(entity.getModelConfigJson());
+        ArrayNode publishedSkills = objectMapper.createArrayNode();
+        for (JsonNode selected : publishedModelConfig.path("skills")) {
+            String skillId = clean(selected.path("skill_id").asText(""));
+            if (skillId.isBlank()) continue;
+            IntegrationService.SkillView skill = integrationService.resolveOwnedSkill(tenantId, ownerUserId, skillId);
+            int versionNo = selected.path("version").asInt(skill.latest_version_no());
+            if (versionNo < 1) {
+                throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "selected skill has no published version");
+            }
+            JsonNode definition = integrationService.resolveSkill(tenantId, skillId, versionNo);
+            ObjectNode pinned = objectMapper.createObjectNode();
+            pinned.put("skill_id", skillId);
+            pinned.put("name", skill.name());
+            pinned.put("version", versionNo);
+            pinned.put("instructions", clean(definition.path("instructions").asText("")));
+            pinned.put("description", skill.description());
+            pinned.set("input_schema", definition.path("input_schema").isObject() ? definition.path("input_schema") : objectMapper.createObjectNode().put("type", "object"));
+            pinned.set("output_schema", definition.path("output_schema").isObject() ? definition.path("output_schema") : objectMapper.createObjectNode().put("type", "object"));
+            pinned.put("max_tokens", boundedInt(definition.path("max_tokens").asInt(800), 64, 8192, "skill.max_tokens"));
+            publishedSkills.add(pinned);
+        }
+        publishedModelConfig.set("skills", publishedSkills);
+        ArrayNode publishedMcpTools = objectMapper.createArrayNode();
+        for (JsonNode selected : publishedModelConfig.path("mcp_tools")) {
+            String connectionId = clean(selected.path("connection_id").asText(""));
+            String toolName = clean(selected.path("tool_name").asText(""));
+            if (connectionId.isBlank() || toolName.isBlank()) continue;
+            IntegrationService.McpView connection = integrationService.resolveOwnedMcp(tenantId, ownerUserId, connectionId);
+            JsonNode tool = null;
+            for (JsonNode candidate : connection.tools()) {
+                if (toolName.equals(candidate.path("name").asText())) { tool = candidate; break; }
+            }
+            if (tool == null) throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "selected MCP tool is unavailable");
+            ObjectNode pinned = objectMapper.createObjectNode();
+            pinned.put("connection_id", connectionId);
+            pinned.put("connection_name", connection.name());
+            pinned.put("endpoint_url", connection.endpoint_url());
+            ObjectNode auth = objectMapper.createObjectNode();
+            auth.put("type", connection.auth_type());
+            auth.put("secret_ref", connection.secret_ref() == null ? "" : connection.secret_ref());
+            pinned.set("auth", auth);
+            pinned.put("tool_name", toolName);
+            pinned.put("title", clean(tool.path("title").asText(toolName)));
+            pinned.put("description", clean(tool.path("description").asText("")));
+            pinned.set("input_schema", tool.path("inputSchema").isObject() ? tool.path("inputSchema") : objectMapper.createObjectNode().put("type", "object"));
+            pinned.set("annotations", tool.path("annotations").isObject() ? tool.path("annotations") : objectMapper.createObjectNode());
+            publishedMcpTools.add(pinned);
+        }
+        publishedModelConfig.set("mcp_tools", publishedMcpTools);
+        ArrayNode publishedJavaScriptTools = objectMapper.createArrayNode();
+        for (JsonNode selected : publishedModelConfig.path("javascript_tools")) {
+            String toolId = clean(selected.path("tool_id").asText(""));
+            if (toolId.isBlank()) continue;
+            JavaScriptToolService.ToolView tool = javaScriptToolService.resolveOwned(tenantId, ownerUserId, toolId);
+            int versionNo = selected.path("version").asInt(tool.latest_version_no());
+            if (versionNo < 1) throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "selected JavaScript tool has no published version");
+            JsonNode definition = javaScriptToolService.resolveVersion(tenantId, toolId, versionNo);
+            if (!definition.path("allow_agent").asBoolean()) throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "selected JavaScript tool is not assigned to AI");
+            ObjectNode pinned = objectMapper.createObjectNode();
+            pinned.put("tool_id", toolId); pinned.put("name", tool.name()); pinned.put("description", tool.description()); pinned.put("version", versionNo);
+            pinned.set("definition", definition); publishedJavaScriptTools.add(pinned);
+        }
+        publishedModelConfig.set("javascript_tools", publishedJavaScriptTools);
+        snapshot.set("model_config", publishedModelConfig);
         snapshot.set("knowledge_base_ids", readJson(entity.getKnowledgeBaseIdsJson()));
         if (entity.getWorkflowId() != null && !entity.getWorkflowId().isBlank()) {
             snapshot.put("workflow_id", entity.getWorkflowId());
@@ -485,6 +557,99 @@ public class ProductAssetService {
         config.put("temperature", boundedDouble(source.path("temperature").asDouble(0.2), 0, 2, "temperature"));
         config.put("top_p", boundedDouble(source.path("top_p").asDouble(1.0), 0.01, 1, "top_p"));
         config.put("max_tokens", boundedInt(source.path("max_tokens").asInt(4096), 64, 32768, "max_tokens"));
+        String prohibitedRules = clean(source.path("prohibited_rules").asText(""));
+        config.put("prohibited_rules", prohibitedRules.length() > 12000 ? prohibitedRules.substring(0, 12000) : prohibitedRules);
+
+        JsonNode memoryRaw = source.path("memory");
+        ObjectNode memory = objectMapper.createObjectNode();
+        String memoryMode = clean(memoryRaw.path("mode").asText("long_term")).toLowerCase(Locale.ROOT);
+        if (!List.of("none", "short_term", "long_term").contains(memoryMode)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "memory.mode is invalid");
+        }
+        String preset = clean(memoryRaw.path("preset").asText("private_assistant")).toLowerCase(Locale.ROOT);
+        if (!List.of("private_assistant", "customer_service", "consulting", "stateless", "custom").contains(preset)) preset = "custom";
+        memory.put("mode", memoryMode);
+        memory.put("preset", preset);
+        memory.put("recent_messages_limit", boundedInt(memoryRaw.path("recent_messages_limit").asInt(12), 1, 50, "memory.recent_messages_limit"));
+        memory.put("context_token_budget", boundedInt(memoryRaw.path("context_token_budget").asInt(1800), 200, 8000, "memory.context_token_budget"));
+        memory.put("compress_trigger_messages", boundedInt(memoryRaw.path("compress_trigger_messages").asInt(24), 8, 200, "memory.compress_trigger_messages"));
+        memory.put("summary_enabled", memoryRaw.path("summary_enabled").asBoolean(true));
+        memory.put("user_profile_enabled", memoryRaw.path("user_profile_enabled").asBoolean(true));
+        memory.put("episodic_enabled", memoryRaw.path("episodic_enabled").asBoolean(true));
+        memory.put("session_recall_enabled", memoryRaw.path("session_recall_enabled").asBoolean(true));
+        memory.put("memory_item_max", boundedInt(memoryRaw.path("memory_item_max").asInt(200), 20, 2000, "memory.memory_item_max"));
+        config.set("memory", memory);
+
+        ArrayNode variables = objectMapper.createArrayNode();
+        JsonNode variablesRaw = source.path("prompt_variables");
+        if (variablesRaw.isArray()) for (JsonNode item : variablesRaw) {
+            if (variables.size() >= 8 || !"current_datetime".equals(item.path("key").asText())) continue;
+            String calendar = item.path("calendar").asText("both").toLowerCase(Locale.ROOT);
+            if (!List.of("gregorian", "lunar", "both").contains(calendar)) calendar = "both";
+            ObjectNode variable = objectMapper.createObjectNode();
+            variable.put("key", "current_datetime");
+            variable.put("enabled", item.path("enabled").asBoolean(true));
+            variable.put("calendar", calendar);
+            String timezone = clean(item.path("timezone").asText("Asia/Shanghai"));
+            variable.put("timezone", timezone.length() > 64 ? "Asia/Shanghai" : timezone);
+            variables.add(variable);
+        }
+        config.set("prompt_variables", variables);
+
+        ArrayNode skills = objectMapper.createArrayNode();
+        JsonNode skillsRaw = source.path("skills");
+        if (skillsRaw.isArray()) for (JsonNode item : skillsRaw) {
+            if (skills.size() >= 20) break;
+            String skillId = clean(item.path("skill_id").asText(""));
+            if (skillId.isBlank() || item.path("version").asInt(0) < 1) continue;
+            ObjectNode skill = objectMapper.createObjectNode();
+            skill.put("skill_id", skillId.length() > 128 ? skillId.substring(0, 128) : skillId);
+            String name = clean(item.path("name").asText(""));
+            skill.put("name", name.length() > 128 ? name.substring(0, 128) : name);
+            skill.put("version", item.path("version").asInt());
+            skills.add(skill);
+        }
+        config.set("skills", skills);
+
+        JsonNode policyRaw = source.path("tool_policy");
+        ObjectNode policy = objectMapper.createObjectNode();
+        String policyMode = clean(policyRaw.path("mode").asText("auto")).toLowerCase(Locale.ROOT);
+        if (!List.of("none", "auto", "required").contains(policyMode)) policyMode = "auto";
+        policy.put("mode", policyMode);
+        policy.put("max_rounds", boundedInt(policyRaw.path("max_rounds").asInt(3), 1, 8, "tool_policy.max_rounds"));
+        policy.put("timeout_seconds", boundedInt(policyRaw.path("timeout_seconds").asInt(30), 1, 120, "tool_policy.timeout_seconds"));
+        policy.put("result_max_chars", boundedInt(policyRaw.path("result_max_chars").asInt(12000), 500, 50000, "tool_policy.result_max_chars"));
+        policy.put("allow_write_tools", policyRaw.path("allow_write_tools").asBoolean(false));
+        String failureMode = clean(policyRaw.path("failure_mode").asText("continue")).toLowerCase(Locale.ROOT);
+        policy.put("failure_mode", "fail".equals(failureMode) ? "fail" : "continue");
+        config.set("tool_policy", policy);
+
+        ArrayNode mcpTools = objectMapper.createArrayNode();
+        JsonNode mcpRaw = source.path("mcp_tools");
+        if (mcpRaw.isArray()) for (JsonNode item : mcpRaw) {
+            if (mcpTools.size() >= 50) break;
+            String connectionId = clean(item.path("connection_id").asText(""));
+            String toolName = clean(item.path("tool_name").asText(""));
+            if (connectionId.isBlank() || toolName.isBlank()) continue;
+            ObjectNode selected = objectMapper.createObjectNode();
+            selected.put("connection_id", connectionId.length() > 128 ? connectionId.substring(0, 128) : connectionId);
+            selected.put("tool_name", toolName.length() > 256 ? toolName.substring(0, 256) : toolName);
+            mcpTools.add(selected);
+        }
+        config.set("mcp_tools", mcpTools);
+
+        ArrayNode javascriptTools = objectMapper.createArrayNode();
+        JsonNode javascriptRaw = source.path("javascript_tools");
+        if (javascriptRaw.isArray()) for (JsonNode item : javascriptRaw) {
+            if (javascriptTools.size() >= 50) break;
+            String toolId = clean(item.path("tool_id").asText(""));
+            if (toolId.isBlank()) continue;
+            ObjectNode selected = objectMapper.createObjectNode();
+            selected.put("tool_id", toolId.length() > 128 ? toolId.substring(0,128) : toolId);
+            selected.put("version", Math.max(1,item.path("version").asInt(1)));
+            javascriptTools.add(selected);
+        }
+        config.set("javascript_tools", javascriptTools);
 
         JsonNode retrievalRaw = source.path("retrieval");
         ObjectNode retrieval = objectMapper.createObjectNode();

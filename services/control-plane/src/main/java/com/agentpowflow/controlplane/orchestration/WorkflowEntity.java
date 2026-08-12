@@ -28,10 +28,8 @@ public class WorkflowEntity {
     private String status = "DRAFT";
     @Column(name = "latest_version_no", nullable = false)
     private int latestVersionNo;
-    @Lob
     @Column(name = "draft_dsl_json", nullable = false, columnDefinition = "text")
     private String draftDslJson = "{}";
-    @Lob
     @Column(name = "draft_layout_json", nullable = false, columnDefinition = "text")
     private String draftLayoutJson = "{}";
     @Column(name = "created_by", nullable = false, length = 128)

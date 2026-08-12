@@ -26,7 +26,6 @@ public class AgentEntity {
     private String name;
     @Column(name = "description", nullable = false, length = 1000)
     private String description = "";
-    @Lob
     @Column(name = "instructions", nullable = false, columnDefinition = "text")
     private String instructions = "";
     @Column(name = "model_config_json", nullable = false, columnDefinition = "text")

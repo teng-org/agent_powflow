@@ -35,7 +35,11 @@ public class SecurityConfig {
                                 "/api/v1/auth/register",
                                 "/api/v1/auth/invitations/accept"
                         ).permitAll()
-                        .requestMatchers("/api/v1/deployments/*/invoke", "/api/v1/deployments/*/invoke/*").permitAll()
+                        .requestMatchers(
+                                "/api/v1/deployments/*/invoke",
+                                "/api/v1/deployments/*/invoke/*",
+                                "/api/v1/deployments/*/v1/chat/completions"
+                        ).permitAll()
                         .requestMatchers("/api/v1/internal/**").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("PLATFORM_ADMIN")
                         .anyRequest().authenticated()

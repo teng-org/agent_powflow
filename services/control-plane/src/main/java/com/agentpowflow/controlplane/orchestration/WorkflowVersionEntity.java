@@ -23,10 +23,8 @@ public class WorkflowVersionEntity {
     private String tenantId;
     @Column(name = "version_no", nullable = false)
     private int versionNo;
-    @Lob
     @Column(name = "dsl_json", nullable = false, columnDefinition = "text")
     private String dslJson;
-    @Lob
     @Column(name = "layout_json", nullable = false, columnDefinition = "text")
     private String layoutJson;
     @Column(name = "checksum", nullable = false, length = 64)

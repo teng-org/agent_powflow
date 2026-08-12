@@ -92,6 +92,18 @@ class InternalAgentConversationTest(unittest.TestCase):
                 )
         self.assertEqual(404, raised.exception.status_code)
 
+    def test_hides_other_users_conversation_in_same_tenant(self) -> None:
+        with patch.object(chat_api.chat_store, "get_session", return_value=_session(actor_id="actor-b")):
+            with self.assertRaises(HTTPException) as raised:
+                chat_api._resolve_internal_agent_session(
+                    tenant_id="tenant-a",
+                    actor_id="actor-a",
+                    conversation_id="conversation-1",
+                    title="Agent",
+                    kb_id="kb-a",
+                )
+        self.assertEqual(404, raised.exception.status_code)
+
 
 if __name__ == "__main__":
     unittest.main()

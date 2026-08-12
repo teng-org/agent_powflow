@@ -9,6 +9,35 @@
 - Pilot 部署加固、容量基线与灾备演练
 - API 配额、计量和更完整的租户治理
 
+## [0.2.0-beta.1] - 2026-08-12
+
+### Added
+
+- OpenAI-compatible Agent API，支持同步响应、SSE、会话连续性和安全记忆诊断
+- Agent 短期/长期/无记忆策略、禁止规则、动态日期时间变量及版本化配置快照
+- Skill、MCP 与 JavaScript 工具统一目录、权限范围、Schema 校验、受控执行和调用轨迹
+- JavaScript 工具工作台，支持创建、测试、发布、版本锁定及 Agent/Workflow 分配
+- Agent 多轮工具规划循环，可依据工具结果继续调用或生成最终回复
+
+### Changed
+
+- Chat 与 Workflow 默认改为 `api_strict`，生产预演不再静默使用 deterministic mock
+- Agent 调试台直接使用当前草稿参数、真实模型端点和连续调试会话
+- 知识库工作台压缩顶部空间并补齐 RAG 索引状态、冻结效果及深色主题
+- Control Plane 文本字段迁移为 PostgreSQL 原生 text，降低 Hibernate LOB 兼容风险
+
+### Fixed
+
+- 仅配置 JavaScript 工具且关闭知识库时，Agent 工具循环被提前跳过
+- 上传文档和登录后的服务错误提示、深色弹窗/下拉框及知识库工作台残留浅色背景
+- RAG 索引生命周期边界、文档元数据清理与调试信息展示问题
+
+### Security
+
+- MCP 目的地址校验、禁止私网/本机解析、禁止重定向和租户级密钥解析
+- 写入型 MCP/JavaScript 工具默认禁止，并增加超时、结果预算和失败策略
+- 发布 API 外部用户命名空间隔离，避免 API Key 轮换或多调用方之间的记忆串台
+
 ## [0.1.0-beta.1] - 2026-08-11
 
 ### Added
@@ -41,5 +70,6 @@
 - 工作空间所有权隔离、受控 HTTP 工具、MCP 接入边界和审计记录
 - 从发布索引移除聊天运行数据和编译产物
 
-[Unreleased]: https://github.com/twy2020/agent_powflow/compare/v0.1.0-beta.1...HEAD
-[0.1.0-beta.1]: https://github.com/twy2020/agent_powflow/releases/tag/v0.1.0-beta.1
+[Unreleased]: https://github.com/teng-org/agent_powflow/compare/v0.2.0-beta.1...HEAD
+[0.2.0-beta.1]: https://github.com/teng-org/agent_powflow/compare/v0.1.0-beta.1...v0.2.0-beta.1
+[0.1.0-beta.1]: https://github.com/teng-org/agent_powflow/releases/tag/v0.1.0-beta.1

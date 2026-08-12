@@ -85,6 +85,81 @@ class InternalAgentInvokeRequest(BaseModel):
     conversation_id: Optional[str] = None
 
 
+def _prepare_internal_agent_context(body: InternalAgentInvokeRequest) -> ChatContext:
+    snapshot = body.agent_snapshot or {}
+    model_config = dict(snapshot.get("model_config") or {})
+    if str(body.actor_id or "").startswith("published:anonymous:"):
+        memory_config = dict(model_config.get("memory") or {})
+        memory_config["user_profile_enabled"] = False
+        model_config["memory"] = memory_config
+    retrieval = dict(model_config.get("retrieval") or {})
+    kb_ids = list(snapshot.get("knowledge_base_ids") or [])
+    raw_input = body.input
+    if isinstance(raw_input, dict) and raw_input.get("message") is not None:
+        message = str(raw_input.get("message") or "").strip()
+    elif isinstance(raw_input, str):
+        message = raw_input.strip()
+    else:
+        message = json.dumps(raw_input, ensure_ascii=False)
+    if not message:
+        raise HTTPException(status_code=400, detail="agent input message is empty")
+
+    kb_id = str(kb_ids[0]) if retrieval.get("enabled", True) and kb_ids else None
+    session = _resolve_internal_agent_session(
+        tenant_id=body.tenant_id,
+        actor_id=body.actor_id,
+        conversation_id=body.conversation_id,
+        title=str(snapshot.get("name") or "Agent API")[:120],
+        kb_id=kb_id,
+    )
+    run = chat_store.create_run(session.session_id, body.tenant_id, body.actor_id, mode="AGENT_API")
+    request = ChatRequest(
+        message=message,
+        use_kb=bool(kb_id),
+        use_agent=False,
+        kb_id=kb_id,
+        top_k=int(retrieval.get("top_k") or 6),
+        rank_method=str(retrieval.get("rank_method") or "vector"),
+        metadata={
+            "source": "published-agent",
+            "agent_id": str(snapshot.get("agent_id") or ""),
+            "anonymous_actor": str(str(body.actor_id or "").startswith("published:anonymous:")).lower(),
+        },
+        agent_config={
+            "agent_id": str(snapshot.get("agent_id") or ""),
+            "instructions": str(snapshot.get("instructions") or ""),
+            **model_config,
+        },
+    )
+    return ChatContext(
+        tenant_id=body.tenant_id,
+        actor_id=body.actor_id,
+        trace_id=str(uuid.uuid4()),
+        source_service="control-plane",
+        session=session,
+        run=run,
+        request=request,
+    )
+
+
+def _agent_memory_observability(ctx: ChatContext) -> Dict[str, Any]:
+    memory = ctx.request.agent_config.memory if ctx.request.agent_config else None
+    mode = memory.mode if memory else "long_term"
+    return {
+        "enabled": mode != "none",
+        "mode": mode,
+        "preset": memory.preset if memory else "platform_default",
+        "conversation_id": ctx.session.session_id,
+        "recent_messages": len(ctx.messages or []),
+        "summary_chars": len(ctx.memory_short_summary or "") + len(ctx.memory_long_summary or ""),
+        "profile_chars": len(ctx.memory_user_profile or ""),
+        "episodic_items": len(ctx.memory_items or []),
+        "session_recall_items": len(ctx.session_retrieval_items or []),
+        "keyword_recall_items": len(ctx.keyword_context_items or []),
+        "injected_context_chars": len(ctx.memory_text or ""),
+    }
+
+
 def _published_agent_citations(items: list[Dict[str, Any]], limit: int = 8) -> list[Dict[str, Any]]:
     citations: list[Dict[str, Any]] = []
     for item in (items or [])[: max(0, min(int(limit), 20))]:
@@ -439,53 +514,10 @@ async def invoke_agent_internal(
     x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
 ) -> Dict:
     _require_internal_token(x_internal_token)
-    snapshot = body.agent_snapshot or {}
-    model_config = dict(snapshot.get("model_config") or {})
-    retrieval = dict(model_config.get("retrieval") or {})
-    kb_ids = list(snapshot.get("knowledge_base_ids") or [])
-    raw_input = body.input
-    if isinstance(raw_input, dict) and raw_input.get("message") is not None:
-        message = str(raw_input.get("message") or "").strip()
-    elif isinstance(raw_input, str):
-        message = raw_input.strip()
-    else:
-        message = json.dumps(raw_input, ensure_ascii=False)
-    if not message:
-        raise HTTPException(status_code=400, detail="agent input message is empty")
-
     started = time.perf_counter()
-    kb_id = str(kb_ids[0]) if retrieval.get("enabled", True) and kb_ids else None
-    session = _resolve_internal_agent_session(
-        tenant_id=body.tenant_id,
-        actor_id=body.actor_id,
-        conversation_id=body.conversation_id,
-        title=str(snapshot.get("name") or "Agent API")[:120],
-        kb_id=kb_id,
-    )
-    run = chat_store.create_run(session.session_id, body.tenant_id, body.actor_id, mode="AGENT_API")
-    request = ChatRequest(
-        message=message,
-        use_kb=bool(kb_id),
-        use_agent=False,
-        kb_id=kb_id,
-        top_k=int(retrieval.get("top_k") or 6),
-        rank_method=str(retrieval.get("rank_method") or "vector"),
-        metadata={"source": "published-agent", "agent_id": str(snapshot.get("agent_id") or "")},
-        agent_config={
-            "agent_id": str(snapshot.get("agent_id") or ""),
-            "instructions": str(snapshot.get("instructions") or ""),
-            **model_config,
-        },
-    )
-    ctx = ChatContext(
-        tenant_id=body.tenant_id,
-        actor_id=body.actor_id,
-        trace_id=str(uuid.uuid4()),
-        source_service="control-plane",
-        session=session,
-        run=run,
-        request=request,
-    )
+    ctx = _prepare_internal_agent_context(body)
+    session = ctx.session
+    run = ctx.run
     output: list[str] = []
     event_count = 0
     first_token_ms: float | None = None
@@ -531,7 +563,46 @@ async def invoke_agent_internal(
         "output": "".join(output),
         "citations": _published_agent_citations(ctx.retrieval_items or []),
         "metrics": metrics,
+        "memory": _agent_memory_observability(ctx),
     }
+
+
+@app.post("/api/v1/internal/agents/invoke/stream")
+async def stream_agent_internal(
+    body: InternalAgentInvokeRequest,
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+):
+    _require_internal_token(x_internal_token)
+    ctx = _prepare_internal_agent_context(body)
+
+    async def event_generator():
+        yield _sse_event(
+            "run",
+            {
+                "event": "run",
+                "run_id": ctx.run.run_id,
+                "conversation_id": ctx.session.session_id,
+            },
+        )
+        try:
+            async for event in chat_pipeline.run_stream(ctx, cancel_on_disconnect=True):
+                payload = dict(event)
+                if event.get("event") == "done":
+                    payload["conversation_id"] = ctx.session.session_id
+                    payload["citations"] = _published_agent_citations(ctx.retrieval_items or [])
+                    payload["memory"] = _agent_memory_observability(ctx)
+                yield _sse_event(str(event.get("event") or "message"), payload)
+        except Exception:
+            yield _sse_event(
+                "error",
+                {"event": "error", "run_id": ctx.run.run_id, "message": "agent runtime failed"},
+            )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/v1/chat/sessions")

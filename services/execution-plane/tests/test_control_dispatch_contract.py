@@ -16,6 +16,26 @@ from api.app import main as api_main
 
 
 class ControlDispatchContractTest(unittest.TestCase):
+    def test_internal_secret_resolution_requires_token_and_preserves_tenant_scope(self):
+        request = SimpleNamespace(headers={"X-Internal-Token": "test-internal-token"})
+        resolved = SimpleNamespace(value="secret-value", secret_id="secret-a", fingerprint="fp-a", version=2)
+        with patch.object(api_main, "CONTROL_PLANE_INTERNAL_TOKEN", "test-internal-token"), patch.object(
+            api_main.workflow_secret_store, "resolve", return_value=resolved
+        ) as resolve:
+            result = asyncio.run(api_main.resolve_workflow_secret_internal(
+                api_main.ApiInternalSecretResolveRequest(tenant_id="tenant-a", secret_ref="secret-a"), request,
+            ))
+        self.assertEqual("secret-value", result["value"])
+        resolve.assert_called_once_with("tenant-a", "secret-a")
+
+        with patch.object(api_main, "CONTROL_PLANE_INTERNAL_TOKEN", "test-internal-token"):
+            with self.assertRaises(api_main.HTTPException) as denied:
+                asyncio.run(api_main.resolve_workflow_secret_internal(
+                    api_main.ApiInternalSecretResolveRequest(tenant_id="tenant-a", secret_ref="secret-a"),
+                    SimpleNamespace(headers={"X-Internal-Token": "wrong"}),
+                ))
+        self.assertEqual(401, denied.exception.status_code)
+
     def test_internal_document_metadata_mutations_use_exact_tenant_identity(self):
         request = SimpleNamespace(
             headers={"X-Internal-Token": "test-internal-token"},

@@ -10,7 +10,7 @@ services:
       MINIO_SECRET_KEY: ${MINIO_ROOT_SECRET_KEY:-minioadmin}
       ALERTMANAGER_WEBHOOK_TOKEN: ${ALERTMANAGER_WEBHOOK_TOKEN:-dev-alertmanager-webhook-token-change-me}
     volumes:
-      - ../scripts/init-minio-prometheus-token.sh:/scripts/init-minio-prometheus-token.sh:ro
+      - ../container-init/init-minio-prometheus-token.sh:/scripts/init-minio-prometheus-token.sh:ro
       - minio_metrics_token:/shared
     depends_on:
       minio-service-identity-init:

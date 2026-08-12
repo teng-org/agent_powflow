@@ -41,7 +41,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     private boolean isPublishedDeploymentPath(String path) {
         if (!path.startsWith("/api/v1/deployments/")) return false;
         String suffix = path.substring("/api/v1/deployments/".length());
-        return suffix.matches("[^/]+/invoke(?:/[^/]+)?");
+        return suffix.matches("[^/]+/(?:invoke(?:/[^/]+)?|v1/chat/completions)");
     }
 
     @Override

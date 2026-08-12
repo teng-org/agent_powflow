@@ -1,6 +1,8 @@
 package com.agentpowflow.controlplane.product;
 
 import com.agentpowflow.controlplane.orchestration.WorkflowService;
+import com.agentpowflow.controlplane.integrations.IntegrationService;
+import com.agentpowflow.controlplane.integrations.JavaScriptToolService;
 import com.agentpowflow.controlplane.web.dto.ProductAssetDto;
 import com.agentpowflow.controlplane.web.dto.WorkflowDto;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -43,6 +45,8 @@ class ProductAssetDeletionTest {
                 apiKeys,
                 mock(DeploymentInvocationRepository.class),
                 workflows,
+                mock(IntegrationService.class),
+                mock(JavaScriptToolService.class),
                 new ObjectMapper(),
                 mock(PasswordEncoder.class)
         );

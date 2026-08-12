@@ -10,7 +10,7 @@ public class SkillVersionEntity {
     @Column(name="skill_id", nullable=false, length=64) private String skillId;
     @Column(name="tenant_id", nullable=false, length=64) private String tenantId;
     @Column(name="version_no", nullable=false) private int versionNo;
-    @Lob @Column(name="definition_json", nullable=false, columnDefinition="text") private String definitionJson;
+    @Column(name="definition_json", nullable=false, columnDefinition="text") private String definitionJson;
     @Column(nullable=false, length=64) private String checksum;
     @Column(name="published_by", nullable=false, length=128) private String publishedBy;
     @Column(name="published_at", nullable=false) private Instant publishedAt;

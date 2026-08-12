@@ -67,7 +67,7 @@ services:
       MINIO_GOVERNANCE_SECRET_KEY: ${MINIO_GOVERNANCE_SECRET_KEY:-apf-governance-dev-secret}
       MINIO_DOCUMENT_BUCKET: ${MINIO_DOCUMENT_BUCKET:-agent-powflow-documents}
     volumes:
-      - ../scripts/init-minio-service-identities.sh:/scripts/init-minio-service-identities.sh:ro
+      - ../container-init/init-minio-service-identities.sh:/scripts/init-minio-service-identities.sh:ro
     depends_on:
       - minio
 
@@ -243,7 +243,7 @@ services:
       CONTROL_PLANE_INTERNAL_URL: http://control-plane:8080
       CONTROL_PLANE_INTERNAL_TOKEN: ${CONTROL_PLANE_INTERNAL_TOKEN:-dev-internal-token}
       TASK_AUTHORITY_CALLBACK_ENABLED: ${TASK_AUTHORITY_CALLBACK_ENABLED:-true}
-      WORKFLOW_PROVIDER_MODE: ${WORKFLOW_PROVIDER_MODE:-mock}
+      WORKFLOW_PROVIDER_MODE: ${WORKFLOW_PROVIDER_MODE:-api_strict}
       WORKFLOW_HTTP_ALLOWED_HOSTS: ${WORKFLOW_HTTP_ALLOWED_HOSTS:-}
       WORKFLOW_HTTP_ALLOW_HTTP: ${WORKFLOW_HTTP_ALLOW_HTTP:-false}
       WORKFLOW_HTTP_ALLOW_PRIVATE_NETWORKS: ${WORKFLOW_HTTP_ALLOW_PRIVATE_NETWORKS:-false}
@@ -286,7 +286,7 @@ services:
       - "${CHAT_PLANE_PORT:-8092}:8092"
     environment:
       CHAT_PLANE_PORT: ${CHAT_PLANE_PORT:-8092}
-      CHAT_PROVIDER_MODE: ${CHAT_PROVIDER_MODE:-mock}
+      CHAT_PROVIDER_MODE: ${CHAT_PROVIDER_MODE:-api_strict}
       CONTROL_PLANE_JWT_SECRET: ${CONTROL_PLANE_JWT_SECRET:-dev-control-jwt-secret}
       CONTROL_PLANE_JWT_KEY_ID: ${CONTROL_PLANE_JWT_KEY_ID:-control-dev-primary}
       CONTROL_PLANE_JWT_PREVIOUS_KEYS: ${CONTROL_PLANE_JWT_PREVIOUS_KEYS:-}
