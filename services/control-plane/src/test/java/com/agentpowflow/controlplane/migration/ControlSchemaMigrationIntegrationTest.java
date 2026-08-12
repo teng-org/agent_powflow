@@ -86,8 +86,8 @@ class ControlSchemaMigrationIntegrationTest {
     }
 
     @Test
-    void emptySchemaMigratesThroughV13AndHibernateValidatesIt() throws SQLException {
-        assertEquals("1,2,3,4,5,6,7,8,9,10,11,12,13", successfulVersions(CONTEXT_SCHEMA));
+    void emptySchemaMigratesThroughV20AndHibernateValidatesIt() throws SQLException {
+        assertEquals(expectedVersions(1), successfulVersions(CONTEXT_SCHEMA));
         assertTrue(tableExists(CONTEXT_SCHEMA, "tenants"));
         assertTrue(tableExists(CONTEXT_SCHEMA, "runs"));
         assertTrue(tableExists(CONTEXT_SCHEMA, "run_node_attempts"));
@@ -111,7 +111,7 @@ class ControlSchemaMigrationIntegrationTest {
         try {
             execute(schema, "CREATE TABLE unrelated_execution_table (id INTEGER PRIMARY KEY)");
             flyway(schema, null).migrate();
-            assertEquals("0,1,2,3,4,5,6,7,8,9,10,11,12,13", successfulVersions(schema));
+            assertEquals("0," + expectedVersions(1), successfulVersions(schema));
             assertTrue(tableExists(schema, "unrelated_execution_table"));
             assertTrue(tableExists(schema, "workflows"));
             assertTrue(tableExists(schema, "run_node_executions"));
@@ -126,14 +126,14 @@ class ControlSchemaMigrationIntegrationTest {
     }
 
     @Test
-    void existingV1SchemaUpgradesDeterministicallyThroughV13() throws SQLException {
+    void existingV1SchemaUpgradesDeterministicallyThroughV20() throws SQLException {
         String schema = schemaName();
         createSchema(schema);
         try {
             flyway(schema, MigrationVersion.fromVersion("1")).migrate();
             assertEquals("1", successfulVersions(schema));
             flyway(schema, null).migrate();
-            assertEquals("1,2,3,4,5,6,7,8,9,10,11,12,13", successfulVersions(schema));
+            assertEquals(expectedVersions(1), successfulVersions(schema));
             assertTrue(tableExists(schema, "run_dispatch_outbox"));
             assertTrue(tableExists(schema, "workflow_secrets"));
             assertTrue(tableExists(schema, "task_dispatch_outbox"));
@@ -325,6 +325,12 @@ class ControlSchemaMigrationIntegrationTest {
             rows.next();
             return rows.getString(1);
         }
+    }
+
+    private static String expectedVersions(int first) {
+        return java.util.stream.IntStream.rangeClosed(first, 20)
+                .mapToObj(Integer::toString)
+                .collect(java.util.stream.Collectors.joining(","));
     }
 
     private static boolean tableExists(String schema, String table) throws SQLException {

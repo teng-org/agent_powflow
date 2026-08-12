@@ -58,7 +58,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install Python test dependencies
-        run: python -m pip install -r services/execution-plane/requirements.txt
+        run: python -m pip install -r services/execution-plane/requirements.txt -r services/chat-plane/requirements.txt
       - name: Start MinIO integration service
         run: |
           docker run -d --name apf-test-minio -p 9000:9000 \

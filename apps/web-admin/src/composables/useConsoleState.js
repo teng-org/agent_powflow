@@ -4,7 +4,7 @@ export function useConsoleState() {
   const cfg = reactive({
     executionBaseUrl: 'http://localhost:8091',
     chatBaseUrl: 'http://localhost:8092',
-    controlPlaneBaseUrl: 'http://localhost:8099',
+    controlPlaneBaseUrl: '/control',
     control: {
       tenantCode: 'platform',
       username: 'admin',
