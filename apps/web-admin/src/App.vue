@@ -487,9 +487,9 @@ onBeforeUnmount(() => {
         <details class="advanced">
           <summary>高级连接配置</summary>
           <div class="grid three">
-            <label>Control Base URL<input v-model="cfg.controlPlaneBaseUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" /></label>
-            <label>Execution Base URL<input v-model="cfg.executionBaseUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" /></label>
-            <label>Chat Base URL<input v-model="cfg.chatBaseUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" /></label>
+            <label>Control Base URL<input v-model="cfg.controlPlaneBaseUrl" type="text" inputmode="url" autocomplete="off" spellcheck="false" /></label>
+            <label>Execution Base URL<input v-model="cfg.executionBaseUrl" type="text" inputmode="url" autocomplete="off" spellcheck="false" /></label>
+            <label>Chat Base URL<input v-model="cfg.chatBaseUrl" type="text" inputmode="url" autocomplete="off" spellcheck="false" /></label>
           </div>
           <div class="grid three">
             <label>Tenant Code<input v-model="cfg.control.tenantCode" autocomplete="off" spellcheck="false" /></label>
