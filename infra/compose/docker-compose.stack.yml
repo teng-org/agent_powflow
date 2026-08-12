@@ -350,7 +350,7 @@ services:
 
   edge-gateway:
     profiles: ["edge-gateway"]
-    image: kong:3.9
+    image: kong:3.9.1
     container_name: agentpowflow-edge-gateway
     restart: unless-stopped
     ports:
