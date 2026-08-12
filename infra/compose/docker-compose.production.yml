@@ -21,9 +21,25 @@ services:
 
   execution-api:
     ports: !reset []
+    build:
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+
+  execution-worker:
+    build:
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+
+  minio-document-bucket-init:
+    build:
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
 
   chat-plane:
     ports: !reset []
+    build:
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
 
   web-app:
     build:
