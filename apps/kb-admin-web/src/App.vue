@@ -3,8 +3,8 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import RagIndexWorkbench from './components/RagIndexWorkbench.vue'
 
 const config = reactive({
-  executionBaseUrl: 'http://localhost:8091',
-  controlPlaneBaseUrl: 'http://127.0.0.1:8099',
+  executionBaseUrl: '/execution',
+  controlPlaneBaseUrl: '/control',
   tenantId: 'platform',
   actorId: 'kb-admin',
   sourceService: 'kb-admin-web',
@@ -2875,7 +2875,11 @@ onBeforeUnmount(() => {
 })
 
 async function receiveWorkspaceAuth(event) {
-  const allowed = new Set([
+  const configuredOrigins = [import.meta.env.VITE_PUBLIC_CONSOLE_ORIGIN, import.meta.env.VITE_PUBLIC_ADMIN_ORIGIN]
+    .filter(Boolean)
+    .map((value) => { try { return new URL(value, window.location.origin).origin } catch { return '' } })
+    .filter(Boolean)
+  const allowed = new Set(configuredOrigins.length ? configuredOrigins : [
     `${window.location.protocol}//${window.location.hostname}:5173`,
     `${window.location.protocol}//${window.location.hostname}:5174`,
   ])
@@ -2896,7 +2900,7 @@ async function receiveWorkspaceAuth(event) {
 }
 
 function openWorkspaceConsole() {
-  window.location.href = `${window.location.protocol}//${window.location.hostname}:5173/`
+  window.location.href = import.meta.env.VITE_PUBLIC_CONSOLE_ORIGIN || `${window.location.protocol}//${window.location.hostname}:5173/`
 }
 
 function returnToWorkspaceConsole() {

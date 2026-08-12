@@ -114,6 +114,9 @@ const deploymentStatusText = (status) => ({ ACTIVE: '运行中', PAUSED: '已暂
 const invocationStatusText = (status) => ({ ACCEPTING: '接收中', ACCEPTED: '处理中', COMPLETED: '已完成', FAILED: '失败', CANCELLED: '已取消', REJECTED: '已拒绝', RATE_LIMITED: '已限流' }[status] || status)
 
 function absoluteApiUrl(path) {
+  if (String(path).startsWith('/api/v1/deployments/') && import.meta.env.VITE_PUBLIC_API_ORIGIN) {
+    return new URL(path, import.meta.env.VITE_PUBLIC_API_ORIGIN).toString()
+  }
   return new URL(`${props.baseUrl}${path}`, window.location.origin).toString()
 }
 
@@ -306,7 +309,12 @@ function visibilityLabel(value) { return value === 'WORKSPACE' ? '工作空间�
 function formatDate(value) { return value ? new Date(value).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' }) : '刚刚' }
 
 const managerWindows = new Map()
-function managerOrigin() { return `${window.location.protocol}//${window.location.hostname}:5180` }
+function normalizedOrigin(value, fallback) {
+  try { return new URL(String(value || fallback), window.location.origin).origin } catch { return fallback }
+}
+function managerOrigin() {
+  return normalizedOrigin(import.meta.env.VITE_PUBLIC_KB_ORIGIN, `${window.location.protocol}//${window.location.hostname}:5180`)
+}
 function openKnowledgeManager(item, view = 'docs') {
   const url = `${managerOrigin()}/?kb=${encodeURIComponent(item.kb_id)}&source=workspace&view=${encodeURIComponent(view)}`
   const popup = window.open(url, `powflow-kb-${item.kb_id}`)
@@ -323,7 +331,7 @@ function handleManagerMessage(event) {
   if (!kbId) return
   event.source.postMessage({
     type: 'powflow-kb-auth', token: props.token, kbId, appearance: props.appearance,
-    controlPlaneBaseUrl: `${window.location.protocol}//${window.location.hostname}:8099`,
+    controlPlaneBaseUrl: '/control',
   }, event.origin)
 }
 

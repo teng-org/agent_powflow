@@ -2,7 +2,7 @@
 
 面向团队和企业的 AI 应用构建平台，提供知识库、RAG、智能体、Workflow、Skill、MCP、JavaScript 工具与 OpenAI-compatible API 发布能力。
 
-当前版本：`v0.2.0-beta.1`（生产预演 Pilot）。适合在独立 Rocky Linux 服务器上进行小范围受控实测，暂不建议承载公开商用、高敏感或关键业务数据。
+当前版本：`v0.2.0-beta.2`（生产预演 Pilot）。适合在独立 Rocky Linux 服务器上进行小范围受控实测，暂不建议承载公开商用、高敏感或关键业务数据。
 
 ## 主要服务
 
@@ -48,6 +48,8 @@ sudo bash deploy/rocky/preflight.sh
 sudo bash deploy/rocky/deploy.sh --env-file /etc/agent-powflow/agent-powflow.env --build
 sudo bash deploy/rocky/check-services.sh --env-file /etc/agent-powflow/agent-powflow.env
 ```
+
+生产环境需要为 `PUBLIC_CONSOLE_ORIGIN`、`PUBLIC_ADMIN_ORIGIN`、`PUBLIC_KB_ORIGIN` 和 `PUBLIC_API_ORIGIN` 配置四个 HTTPS Origin。主机 Nginx 可从 `deploy/rocky/nginx-agent-powflow.conf.template` 初始化；确认域名和证书路径后再启用。若需要随系统启动，可将 `deploy/rocky/agent-powflow.service` 安装到 `/etc/systemd/system/`。
 
 生产 Compose 覆盖会隐藏数据库、消息队列、对象存储、Qdrant 与内部后端端口。持久数据位于 Docker named volumes，不会进入 Git 仓库。
 

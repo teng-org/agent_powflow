@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Powflow production stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/agent-powflow
+ExecStart=/opt/agent-powflow/deploy/rocky/deploy.sh --env-file /etc/agent-powflow/agent-powflow.env
+ExecStop=/usr/bin/docker compose -p agentpowflow --profile edge-gateway --env-file /etc/agent-powflow/agent-powflow.env -f /opt/agent-powflow/infra/compose/docker-compose.stack.yml -f /opt/agent-powflow/infra/compose/docker-compose.production.yml down
+TimeoutStartSec=0
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

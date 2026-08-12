@@ -12,7 +12,7 @@
 
   <groupId>com.agentpowflow</groupId>
   <artifactId>control-plane</artifactId>
-  <version>0.2.0-beta.1</version>
+  <version>0.2.0-beta.2</version>
   <name>control-plane</name>
   <description>Agent Powflow Control Plane</description>
 

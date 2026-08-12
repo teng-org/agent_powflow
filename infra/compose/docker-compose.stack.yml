@@ -59,6 +59,7 @@ services:
     entrypoint: ["/bin/sh", "/scripts/init-minio-service-identities.sh"]
     environment:
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_SCHEME: ${MINIO_SCHEME:-http}
       MINIO_ROOT_ACCESS_KEY: ${MINIO_ROOT_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_SECRET_KEY: ${MINIO_ROOT_SECRET_KEY:-minioadmin}
       MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:-apf-app-dev}

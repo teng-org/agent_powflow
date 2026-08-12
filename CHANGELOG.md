@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.0-beta.2 - 2026-08-12
+
+- 前端生产容器改为 Vite 构建产物与 Nginx 静态服务，不再使用开发服务器。
+- 控制台、管理后台、知识库工作台和发布 API 仅绑定宿主机回环地址，由主机反向代理统一终止 TLS。
+- 新增生产 HTTPS 域名变量，修复独立子域名下的知识库跳转、跨窗口授权与公开 API 地址生成。
+- 修复 Rocky Linux 部署校验对可选空配置的误判，以及内部 MinIO HTTP/TLS 配置不一致。
+- 增强服务检查：验证真实模型严格模式、回环端口绑定、生产前端和后端健康状态。
+- 新增 Nginx HTTPS/SSE 配置模板和 systemd 服务模板。
+
 本项目遵循 [Semantic Versioning](https://semver.org/)，变更按 Keep a Changelog 风格维护。
 
 ## [Unreleased]
