@@ -2,8 +2,8 @@ import { computed, reactive } from 'vue'
 
 export function useConsoleState() {
   const cfg = reactive({
-    executionBaseUrl: 'http://localhost:8091',
-    chatBaseUrl: 'http://localhost:8092',
+    executionBaseUrl: '/execution',
+    chatBaseUrl: '/chat',
     controlPlaneBaseUrl: '/control',
     control: {
       tenantCode: 'platform',
