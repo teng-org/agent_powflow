@@ -9,7 +9,7 @@ from retrieval.schemas import IngestDocumentRequest, SearchRequest
 from retrieval.rag2 import fuse_rankings, limit_per_document, normalize_rank_method
 from retrieval.store import ChunkRecord, kb_store
 from retrieval.index_lifecycle import index_lifecycle
-from retrieval.structured_chunking import build_parent_child_chunks, parse_content_blocks
+from retrieval.structured_chunking import build_page_chunks, build_parent_child_chunks, parse_content_blocks
 from models.reranker_provider import reranker_provider
 from runtime.task_authority import TaskAuthorityBridge
 
@@ -77,8 +77,10 @@ def preprocess_text_for_chunk(text: str) -> str:
     value = re.sub(r"[ \t]*\n[ \t]*", "\n", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
     # Remove OCR-inserted spaces between adjacent CJK characters.
-    value = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", value)
-    return value.strip()
+    value = re.sub(r"(?<=[\u4e00-\u9fff])[ \t]+(?=[\u4e00-\u9fff])", "", value)
+    # Keep form-feed page markers, including an empty cover page, so page-mode
+    # chunk metadata retains the source document's physical page numbers.
+    return value.strip(" \t\n")
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -196,6 +198,8 @@ def _chunk_text(
         delim = _normalize_delimiter(chunk_delimiter)
         parts = [p.strip() for p in value.split(delim)]
         return [p for p in parts if p]
+    if method == "page":
+        return [page.strip() for page in value.split("\f") if page and page.strip()]
 
     # default: fixed-length with overlap
     start = 0
@@ -334,7 +338,16 @@ def ingest_document(req: IngestDocumentRequest) -> dict:
     preprocessed = cleaned_content.strip()
     max_chars = embedding_provider.max_input_chars(req.tenant_id)
     structured_chunks = []
-    if (req.chunk_method or "fixed").strip().lower() not in {"sentence", "delimiter"}:
+    chunk_method = (req.chunk_method or "fixed").strip().lower()
+    # Fixed mode is an explicit character-window contract. Semantic block
+    # grouping would change the requested boundaries and configured size.
+    if chunk_method == "page":
+        structured_chunks = build_page_chunks(
+            preprocessed,
+            identity=f"{req.tenant_id}:{req.kb_id}:{req.doc_id}",
+            max_child_chars=max_chars or None,
+        )
+    elif chunk_method in {"paragraph", "markdown"}:
         structured_chunks = build_parent_child_chunks(
             parse_content_blocks(preprocessed),
             identity=f"{req.tenant_id}:{req.kb_id}:{req.doc_id}",

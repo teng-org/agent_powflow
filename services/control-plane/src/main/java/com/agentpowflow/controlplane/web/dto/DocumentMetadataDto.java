@@ -14,4 +14,11 @@ public final class DocumentMetadataDto {
             @NotBlank @Pattern(regexp = "^(edit|delete)$") String action,
             @Size(max = 1_000_000) String text
     ) {}
+
+    public record ChunkTextReplaceRequest(
+            @NotBlank @Size(max = 10_000) String search_text,
+            @Size(max = 1_000_000) String replacement_text,
+            boolean case_sensitive,
+            boolean apply
+    ) {}
 }

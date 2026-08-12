@@ -54,6 +54,31 @@ class DocumentUploadCommandServiceTest {
     }
 
     @Test
+    void acceptsPageChunkingForIndexedUpload() {
+        var file = new MockMultipartFile("file", "paged.pdf", "application/pdf", "pdf".getBytes());
+        var intent = new DocumentUploadIntentService.UploadIntent(
+                "task-page", "doc-page", "outbox-page", "UPLOAD_CLEAN_CHUNK_EMBED"
+        );
+        when(intentService.create(anyString(), anyString(), anyString(), anyString(), anyString(),
+                anyString(), eq("page"), nullable(String.class), anyInt(), anyInt(), anyBoolean())).thenReturn(intent);
+        when(executionClient.stageDocument(anyString(), anyString(), anyString(), anyString(), anyString(),
+                eq("page"), nullable(String.class), anyInt(), anyInt(), any())).thenReturn(Map.of(
+                "status", "staged", "process_mode", "UPLOAD_CLEAN_CHUNK_EMBED", "object_bucket", "documents",
+                "content_object_key", "text-key", "content_object_sha256", "a".repeat(64),
+                "source_object_key", "source-key", "source_object_sha256", "b".repeat(64),
+                "source_object_size_bytes", 3, "extracted_object_size_bytes", 3
+        ));
+
+        TaskDto.UploadResponse response = service.upload(
+                "tenant-a", "actor-a", "trace-page", "kb-a", List.of(file),
+                "UPLOAD_CLEAN_CHUNK_EMBED", "page", null, 500, 50, false
+        );
+
+        assertEquals("accepted", response.status());
+        verify(intentService).activate(eq("tenant-a"), eq(intent), anyMap());
+    }
+
+    @Test
     void stagingFailureClosesIntentAndRequestsExactCleanup() {
         var file = new MockMultipartFile("file", "broken.pdf", "application/pdf", "broken".getBytes());
         var intent = new DocumentUploadIntentService.UploadIntent(

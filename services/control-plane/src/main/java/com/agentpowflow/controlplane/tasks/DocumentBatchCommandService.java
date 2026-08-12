@@ -28,7 +28,7 @@ import java.util.UUID;
 public class DocumentBatchCommandService {
     private static final Set<String> ACTIVE = Set.of("PENDING", "RUNNING", "CANCELLING");
     private static final Set<String> OPERATIONS = Set.of("chunk", "embed", "summarize", "move", "tag", "delete");
-    private static final Set<String> CHUNK_METHODS = Set.of("fixed", "sentence", "paragraph", "markdown", "delimiter");
+    private static final Set<String> CHUNK_METHODS = Set.of("fixed", "sentence", "paragraph", "markdown", "delimiter", "page");
     private static final DateTimeFormatter BATCH_TIME = DateTimeFormatter.ofPattern("MMdd-HHmmss");
 
     private final KnowledgeBaseRepository knowledgeBaseRepository;

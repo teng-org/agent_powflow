@@ -16,6 +16,16 @@ from api.app import main as api_main
 
 
 class ControlDispatchContractTest(unittest.TestCase):
+    def test_page_chunk_method_is_accepted_and_pdf_extraction_preserves_boundaries(self):
+        self.assertEqual("page", api_main._validate_chunk_method("page"))
+        with patch.object(api_main, "PdfReader") as reader_type:
+            reader_type.return_value.pages = [
+                SimpleNamespace(extract_text=lambda: ""),
+                SimpleNamespace(extract_text=lambda: "page two"),
+            ]
+            extracted = api_main._extract_text_from_file("sample.pdf", b"pdf")
+        self.assertEqual("\fpage two", extracted)
+
     def test_internal_secret_resolution_requires_token_and_preserves_tenant_scope(self):
         request = SimpleNamespace(headers={"X-Internal-Token": "test-internal-token"})
         resolved = SimpleNamespace(value="secret-value", secret_id="secret-a", fingerprint="fp-a", version=2)

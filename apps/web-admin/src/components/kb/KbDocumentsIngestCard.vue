@@ -94,6 +94,7 @@ const batchBlocked = computed(() => {
         <select v-model="kbState.ingest.chunk_method">
           <option value="sentence">sentence</option>
           <option value="fixed">fixed</option>
+          <option value="page">page</option>
           <option value="delimiter">delimiter</option>
         </select>
       </label>
